@@ -120,4 +120,20 @@ mod tests {
         assert_eq!(result.left, 0.25);
         assert_eq!(result.left, result.right);
     }
+
+    #[test]
+    fn polarity_inversion_is_independent_and_double_inversion_is_identity() {
+        let input = StereoFrame {
+            left: 0.75_f32,
+            right: -0.25,
+        };
+        let left_inverted = input.invert_phase(true, false);
+        assert_eq!(left_inverted.left, -0.75);
+        assert_eq!(left_inverted.right, -0.25);
+        assert_eq!(left_inverted.invert_phase(true, false), input);
+
+        let right_inverted = input.invert_phase(false, true);
+        assert_eq!(right_inverted.left, 0.75);
+        assert_eq!(right_inverted.right, 0.25);
+    }
 }
