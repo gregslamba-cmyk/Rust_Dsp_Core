@@ -1,0 +1,9 @@
+pub mod analog_variance;
+pub mod filters;
+pub mod nonlinear_stages;
+pub mod psu_sag;
+pub mod realtime_controls;
+pub mod resampler_bitdepth;
+pub mod routing_matrix;
+pub mod sidechain_processor;
+pub mod transformer_hysteresis;
