@@ -150,6 +150,29 @@ impl<T: Float> Biquad<T> {
         output
     }
 
+    pub fn magnitude_at(&self, omega: T) -> T {
+        let cosine = omega.cos();
+        let sine = omega.sin();
+        let cosine_two = (omega + omega).cos();
+        let sine_two = (omega + omega).sin();
+        let numerator_real = self.b0 + self.b1 * cosine + self.b2 * cosine_two;
+        let numerator_imaginary = -(self.b1 * sine + self.b2 * sine_two);
+        let denominator_real = T::one() + self.a1 * cosine + self.a2 * cosine_two;
+        let denominator_imaginary = -(self.a1 * sine + self.a2 * sine_two);
+        let numerator_magnitude_squared =
+            numerator_real * numerator_real + numerator_imaginary * numerator_imaginary;
+        let denominator_magnitude_squared =
+            denominator_real * denominator_real + denominator_imaginary * denominator_imaginary;
+        if !numerator_magnitude_squared.is_finite()
+            || !denominator_magnitude_squared.is_finite()
+            || denominator_magnitude_squared <= T::zero()
+        {
+            return T::zero();
+        }
+
+        (numerator_magnitude_squared / denominator_magnitude_squared).sqrt()
+    }
+
     pub fn reset(&mut self) {
         self.z1 = T::zero();
         self.z2 = T::zero();

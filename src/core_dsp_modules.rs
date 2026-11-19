@@ -6,4 +6,5 @@ pub mod realtime_controls;
 pub mod resampler_bitdepth;
 pub mod routing_matrix;
 pub mod sidechain_processor;
+pub mod surgical_eq;
 pub mod transformer_hysteresis;
