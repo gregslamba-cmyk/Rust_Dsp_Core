@@ -6,6 +6,7 @@ pub enum RoutingMode {
     Stereo,
     DualMono,
     MidSide,
+    Multichannel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,7 +36,10 @@ pub fn route_channels<T: Float>(channels: &mut [T], mode: RoutingMode) {
                 pair[1] = frame.right;
             }
         }
-        RoutingMode::Mono | RoutingMode::Stereo | RoutingMode::DualMono => {}
+        RoutingMode::Mono
+        | RoutingMode::Stereo
+        | RoutingMode::DualMono
+        | RoutingMode::Multichannel => {}
     }
 }
 
@@ -62,7 +66,7 @@ impl<T: Float> StereoFrame<T> {
                     right: mono,
                 }
             }
-            RoutingMode::Stereo | RoutingMode::DualMono => self,
+            RoutingMode::Stereo | RoutingMode::DualMono | RoutingMode::Multichannel => self,
             RoutingMode::MidSide => {
                 let scale = T::one() / (T::one() + T::one()).sqrt();
                 Self {
@@ -136,4 +140,20 @@ mod tests {
         assert_eq!(right_inverted.left, 0.75);
         assert_eq!(right_inverted.right, 0.25);
     }
+
+    #[test]
+    fn multichannel_routing_preserves_arbitrary_channel_arrays() {
+        let mut channels = [0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6];
+        route_channels(&mut channels, RoutingMode::Multichannel);
+        assert_eq!(channels, [0.1, -0.2, 0.3, -0.4, 0.5, -0.6]);
+
+        route_channels(&mut channels, RoutingMode::MidSide);
+        decode_mid_side_channels(&mut channels);
+        let expected = [0.1_f32, -0.2, 0.3, -0.4, 0.5, -0.6];
+        for (actual, expected) in channels.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
+    }
+
+    use super::{decode_mid_side_channels, route_channels};
 }

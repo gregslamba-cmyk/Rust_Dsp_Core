@@ -1,6 +1,9 @@
 pub mod analog_variance;
 pub mod filters;
+pub mod metering;
 pub mod nonlinear_stages;
+pub mod opto_compressor;
+pub mod panic_protection;
 pub mod psu_sag;
 pub mod realtime_controls;
 pub mod resampler_bitdepth;
@@ -8,3 +11,4 @@ pub mod routing_matrix;
 pub mod sidechain_processor;
 pub mod surgical_eq;
 pub mod transformer_hysteresis;
+pub mod vari_mu;
