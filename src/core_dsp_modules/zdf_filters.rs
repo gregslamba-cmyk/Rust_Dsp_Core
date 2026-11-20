@@ -79,7 +79,7 @@ impl ZdfSvf {
         self.frequency = frequency;
         self.q = q.max(0.001);
         self.gain_db = gain_db;
-        self.non_linearity = non_linearity.max(0.0).min(10.0);
+        self.non_linearity = non_linearity.clamp(0.0, 10.0);
 
         self.update_coefficients();
         true
@@ -136,9 +136,24 @@ impl ZdfSvf {
                 self.m2 = 0.0;
             }
             FilterType::LowShelf | FilterType::HighShelf => {
-                self.m0 = 1.0;
-                self.m1 = self.k;
-                self.m2 = 1.0;
+                // Simper SVF shelf: pre-warp the corner by sqrt(A) so DC/Nyquist gains stay exact.
+                let shelf_gain = a * a;
+                let g_shelf = self.g / a.sqrt();
+                let a1_s = 1.0 / (1.0 + g_shelf * (g_shelf + self.k));
+                let a2_s = g_shelf * a1_s;
+                let a3_s = g_shelf * a2_s;
+                self.a1 = a1_s;
+                self.a2 = a2_s;
+                self.a3 = a3_s;
+                if self.filter_type == FilterType::LowShelf {
+                    self.m0 = 1.0;
+                    self.m1 = self.k * (a - 1.0);
+                    self.m2 = shelf_gain - 1.0;
+                } else {
+                    self.m0 = shelf_gain;
+                    self.m1 = self.k * (1.0 - a) * a;
+                    self.m2 = 1.0 - shelf_gain;
+                }
             }
         }
     }

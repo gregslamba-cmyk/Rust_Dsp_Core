@@ -44,7 +44,7 @@ impl<T: Float> PsuSag<T> {
             return false;
         }
         self.coefficient = (-1.0 / (sr * rec)).exp();
-        self.depth = dep.max(0.0).min(1.0);
+        self.depth = dep.clamp(0.0, 1.0);
         self.envelope = 0.0;
         self.ripple_phase = 0.0;
         true
@@ -83,7 +83,7 @@ impl<T: Float> PsuSag<T> {
         }
 
         let final_sag = if sag.is_finite() {
-            sag.max(0.1).min(1.0)
+            sag.clamp(0.1, 1.0)
         } else {
             1.0
         };

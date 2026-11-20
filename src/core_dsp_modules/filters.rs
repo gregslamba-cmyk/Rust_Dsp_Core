@@ -102,11 +102,25 @@ impl<T: Float> SvfFilter<T> {
                 self.m2 = T::zero();
             }
             FilterType::LowShelf | FilterType::HighShelf => {
-                let shelf_a = a.sqrt();
-                let _ = shelf_a;
-                self.m0 = T::one();
-                self.m1 = k;
-                self.m2 = T::one();
+                // Simper SVF shelf: the shelf corner is pre-warped by sqrt(A) so the
+                // transition stays centred while DC/Nyquist gains remain exact.
+                let shelf_gain = a * a; // A^2 equals the linear shelf gain
+                let g_shelf = g / a.sqrt();
+                let a1_s = T::one() / (T::one() + g_shelf * (g_shelf + k));
+                let a2_s = g_shelf * a1_s;
+                let a3_s = g_shelf * a2_s;
+                self.a1 = a1_s;
+                self.a2 = a2_s;
+                self.a3 = a3_s;
+                if kind == FilterType::LowShelf {
+                    self.m0 = T::one();
+                    self.m1 = k * (a - T::one());
+                    self.m2 = shelf_gain - T::one();
+                } else {
+                    self.m0 = shelf_gain;
+                    self.m1 = k * (T::one() - a) * a;
+                    self.m2 = T::one() - shelf_gain;
+                }
             }
         }
         true
@@ -316,7 +330,63 @@ impl<T: Float> Biquad<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Biquad, FilterType};
+    use super::{Biquad, FilterType, SvfFilter};
+
+    fn steady_gain(filter: &mut SvfFilter<f64>, frequency: f64) -> f64 {
+        const SAMPLE_RATE: f64 = 48_000.0;
+        let length = 48_000usize;
+        let mut input_energy = 0.0;
+        let mut output_energy = 0.0;
+        let mut skip = length * 3 / 4;
+        for index in 0..length {
+            let sample = (std::f64::consts::TAU * frequency * index as f64 / SAMPLE_RATE).sin();
+            let output = filter.process(sample);
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            input_energy += sample * sample;
+            output_energy += output * output;
+        }
+        (output_energy / input_energy).sqrt()
+    }
+
+    #[test]
+    fn svf_low_shelf_keeps_dc_gain_and_unity_at_high_frequency() {
+        let mut filter = SvfFilter::<f64>::default();
+        assert!(filter.configure(48_000.0, FilterType::LowShelf, 10_000.0, 0.707, 6.0));
+        // DC behaves as Nyquist-relative "0 Hz": must reach the full +6 dB shelf gain.
+        let dc_gain = steady_gain(&mut filter, 20.0);
+        assert!((dc_gain - 1.995).abs() < 0.1, "low shelf DC gain {dc_gain}");
+
+        filter.reset();
+        let high_gain = steady_gain(&mut filter, 20_000.0);
+        assert!((high_gain - 1.0).abs() < 0.1, "low shelf 20 kHz gain {high_gain}");
+    }
+
+    #[test]
+    fn svf_high_shelf_keeps_unity_at_low_frequency_and_boost_at_high() {
+        let mut filter = SvfFilter::<f64>::default();
+        assert!(filter.configure(48_000.0, FilterType::HighShelf, 10_000.0, 0.707, 6.0));
+        let low_gain = steady_gain(&mut filter, 20.0);
+        assert!((low_gain - 1.0).abs() < 0.1, "high shelf 20 Hz gain {low_gain}");
+
+        filter.reset();
+        let high_gain = steady_gain(&mut filter, 20_000.0);
+        assert!((high_gain - 1.995).abs() < 0.15, "high shelf 20 kHz gain {high_gain}");
+    }
+
+    #[test]
+    fn svf_low_pass_is_open_near_nyquist_without_layout_shifts() {
+        let mut svf = SvfFilter::<f64>::default();
+        assert!(svf.configure(48_000.0, FilterType::LowPass, 18_000.0, 0.707, 0.0));
+        let passband_gain = steady_gain(&mut svf, 2_000.0);
+        assert!((passband_gain - 1.0).abs() < 0.15, "svf passband {passband_gain}");
+
+        svf.reset();
+        let stopband_gain = steady_gain(&mut svf, 23_000.0);
+        assert!(stopband_gain < 0.3, "svf stopband {stopband_gain}");
+    }
 
     #[test]
     fn supported_filter_types_configure_and_process_finite_samples() {
@@ -332,12 +402,23 @@ mod tests {
             let mut filter = Biquad::<f64>::default();
             assert!(filter.configure(48_000.0, kind, 1_000.0, 0.707, 3.0));
             assert!(filter.process(1.0).is_finite());
+
+            let mut svf = SvfFilter::<f64>::default();
+            assert!(svf.configure(48_000.0, kind, 1_000.0, 0.707, 3.0));
+            assert!(svf.process(1.0).is_finite());
         }
     }
 
     #[test]
     fn invalid_cutoff_is_rejected() {
         assert!(!Biquad::<f32>::default().configure(
+            48_000.0,
+            FilterType::LowPass,
+            24_000.0,
+            0.707,
+            0.0
+        ));
+        assert!(!SvfFilter::<f32>::default().configure(
             48_000.0,
             FilterType::LowPass,
             24_000.0,

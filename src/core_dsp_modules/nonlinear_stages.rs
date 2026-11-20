@@ -135,7 +135,7 @@ impl DynamicMirrorPreEmphasis {
 
     #[inline]
     pub fn pre_emphasis(&mut self, sample: f64, emphasis: f64) -> f64 {
-        let emphasis = emphasis.max(0.0).min(1.0);
+        let emphasis = emphasis.clamp(0.0, 1.0);
         let out = sample + (sample - self.pre_state) * emphasis * 0.5;
         self.pre_state = sample;
         out
@@ -143,7 +143,7 @@ impl DynamicMirrorPreEmphasis {
 
     #[inline]
     pub fn de_emphasis(&mut self, sample: f64, emphasis: f64) -> f64 {
-        let emphasis = emphasis.max(0.0).min(1.0);
+        let emphasis = emphasis.clamp(0.0, 1.0);
         let out = sample - (sample - self.de_state) * emphasis * 0.5;
         self.de_state = sample;
         out
@@ -184,7 +184,7 @@ pub fn process_nonlinear(sample: f64, drive: f64, mode: NonlinearMode) -> f64 {
 
     match mode {
         NonlinearMode::SoftClip => driven.tanh() / drive,
-        NonlinearMode::HardClip => driven.max(-1.0).min(1.0) / drive,
+        NonlinearMode::HardClip => driven.clamp(-1.0, 1.0) / drive,
         NonlinearMode::Asymmetric => {
             let bias = 0.2;
             let second_harmonic = 0.05 * driven * driven;

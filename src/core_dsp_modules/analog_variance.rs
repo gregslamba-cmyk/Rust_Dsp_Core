@@ -10,7 +10,7 @@ pub struct AnalogVariance {
 impl AnalogVariance {
     pub fn from_seed(seed: u64, tolerance: f64, crosstalk_max: f64, analog_drift: f64) -> Self {
         let drift = if analog_drift.is_finite() {
-            analog_drift.max(0.0).min(1.0)
+            analog_drift.clamp(0.0, 1.0)
         } else {
             1.0
         };
