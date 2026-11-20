@@ -17,8 +17,8 @@ impl<T: Float> Default for PsuSag<T> {
             envelope: 0.0,
             coefficient: 0.0,
             depth: 0.0,
-            noise_level: 0.0,     // OFF BY DEFAULT
-            ripple_enabled: false,  // OFF BY DEFAULT
+            noise_level: 0.0,      // OFF BY DEFAULT
+            ripple_enabled: false, // OFF BY DEFAULT
             ripple_phase: 0.0,
             _marker: std::marker::PhantomData,
         }
@@ -35,12 +35,7 @@ impl<T: Float> PsuSag<T> {
         let rec = recovery_seconds.to_f64().unwrap_or(0.1);
         let dep = depth.to_f64().unwrap_or(0.0);
 
-        if !sr.is_finite()
-            || sr <= 0.0
-            || !rec.is_finite()
-            || rec <= 0.0
-            || !dep.is_finite()
-        {
+        if !sr.is_finite() || sr <= 0.0 || !rec.is_finite() || rec <= 0.0 || !dep.is_finite() {
             return false;
         }
         self.coefficient = (-1.0 / (sr * rec)).exp();
@@ -107,5 +102,3 @@ mod tests {
         assert_eq!(default_psu.gain(0.0), 1.0);
     }
 }
-
-

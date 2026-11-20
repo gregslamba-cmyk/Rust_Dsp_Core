@@ -67,7 +67,13 @@ impl TransformerHysteresis {
     }
 
     #[inline]
-    pub fn process(&mut self, input: f64, drive: f64, hysteresis: f64, frequency_dependency: f64) -> f64 {
+    pub fn process(
+        &mut self,
+        input: f64,
+        drive: f64,
+        hysteresis: f64,
+        frequency_dependency: f64,
+    ) -> f64 {
         if !input.is_finite()
             || !drive.is_finite()
             || !hysteresis.is_finite()
@@ -183,13 +189,21 @@ mod tests {
     fn bass_is_compressed_while_highs_stay_near_unity() {
         let low = render(100.0, 4.0, 1.0);
         let low_unity = render(100.0, 1.0, 1.0);
-        let low_ratio = rms(&low[SAMPLE_RATE as usize / 20..]) / rms(&low_unity[SAMPLE_RATE as usize / 20..]);
-        assert!(low_ratio < 0.95, "low band should be compressed: {low_ratio}");
+        let low_ratio =
+            rms(&low[SAMPLE_RATE as usize / 20..]) / rms(&low_unity[SAMPLE_RATE as usize / 20..]);
+        assert!(
+            low_ratio < 0.95,
+            "low band should be compressed: {low_ratio}"
+        );
 
         let high = render(10_000.0, 4.0, 1.0);
         let high_unity = render(10_000.0, 1.0, 1.0);
-        let high_ratio = rms(&high[SAMPLE_RATE as usize / 20..]) / rms(&high_unity[SAMPLE_RATE as usize / 20..]);
-        assert!(high_ratio > 0.95, "high band must stay linear: {high_ratio}");
+        let high_ratio =
+            rms(&high[SAMPLE_RATE as usize / 20..]) / rms(&high_unity[SAMPLE_RATE as usize / 20..]);
+        assert!(
+            high_ratio > 0.95,
+            "high band must stay linear: {high_ratio}"
+        );
     }
 
     #[test]
@@ -208,4 +222,3 @@ mod tests {
         assert!((slow_step - 0.5).abs() < 1.0e-6);
     }
 }
-

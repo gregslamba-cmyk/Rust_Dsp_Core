@@ -361,7 +361,10 @@ mod tests {
 
         filter.reset();
         let high_gain = steady_gain(&mut filter, 20_000.0);
-        assert!((high_gain - 1.0).abs() < 0.1, "low shelf 20 kHz gain {high_gain}");
+        assert!(
+            (high_gain - 1.0).abs() < 0.1,
+            "low shelf 20 kHz gain {high_gain}"
+        );
     }
 
     #[test]
@@ -369,11 +372,17 @@ mod tests {
         let mut filter = SvfFilter::<f64>::default();
         assert!(filter.configure(48_000.0, FilterType::HighShelf, 10_000.0, 0.707, 6.0));
         let low_gain = steady_gain(&mut filter, 20.0);
-        assert!((low_gain - 1.0).abs() < 0.1, "high shelf 20 Hz gain {low_gain}");
+        assert!(
+            (low_gain - 1.0).abs() < 0.1,
+            "high shelf 20 Hz gain {low_gain}"
+        );
 
         filter.reset();
         let high_gain = steady_gain(&mut filter, 20_000.0);
-        assert!((high_gain - 1.995).abs() < 0.15, "high shelf 20 kHz gain {high_gain}");
+        assert!(
+            (high_gain - 1.995).abs() < 0.15,
+            "high shelf 20 kHz gain {high_gain}"
+        );
     }
 
     #[test]
@@ -381,7 +390,10 @@ mod tests {
         let mut svf = SvfFilter::<f64>::default();
         assert!(svf.configure(48_000.0, FilterType::LowPass, 18_000.0, 0.707, 0.0));
         let passband_gain = steady_gain(&mut svf, 2_000.0);
-        assert!((passband_gain - 1.0).abs() < 0.15, "svf passband {passband_gain}");
+        assert!(
+            (passband_gain - 1.0).abs() < 0.15,
+            "svf passband {passband_gain}"
+        );
 
         svf.reset();
         let stopband_gain = steady_gain(&mut svf, 23_000.0);

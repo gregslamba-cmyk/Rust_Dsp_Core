@@ -1,6 +1,5 @@
 use num_traits::Float;
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NonlinearMode {
     SoftClip,
@@ -37,7 +36,11 @@ impl SlewRateLimiter {
 
     #[inline]
     pub fn process(&mut self, sample: f64, max_v_per_sec: f64, sample_rate: f64) -> f64 {
-        if !sample.is_finite() || !max_v_per_sec.is_finite() || !sample_rate.is_finite() || sample_rate <= 0.0 {
+        if !sample.is_finite()
+            || !max_v_per_sec.is_finite()
+            || !sample_rate.is_finite()
+            || sample_rate <= 0.0
+        {
             return sample;
         }
         let max_delta = max_v_per_sec / sample_rate;
@@ -100,11 +103,7 @@ impl AcCoupling {
         }
 
         let shifted = output - self.dc_bias;
-        if shifted.is_finite() {
-            shifted
-        } else {
-            0.0
-        }
+        if shifted.is_finite() { shifted } else { 0.0 }
     }
 }
 
@@ -172,7 +171,6 @@ pub fn soft_clip<T: Float>(sample: T, drive: T) -> T {
     T::from(out).unwrap_or(T::zero())
 }
 
-
 #[inline]
 pub fn process_nonlinear(sample: f64, drive: f64, mode: NonlinearMode) -> f64 {
     if !sample.is_finite() || !drive.is_finite() {
@@ -226,7 +224,7 @@ pub fn process_nonlinear(sample: f64, drive: f64, mode: NonlinearMode) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{NonlinearMode, SlewRateLimiter, AcCoupling, process_nonlinear};
+    use super::{AcCoupling, NonlinearMode, SlewRateLimiter, process_nonlinear};
 
     #[test]
     fn test_nonlinear_modes_finite() {
@@ -259,4 +257,3 @@ mod tests {
         assert_eq!(ac.process(0.0), 0.0);
     }
 }
-

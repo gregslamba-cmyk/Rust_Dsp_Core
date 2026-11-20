@@ -75,4 +75,3 @@ mod tests {
         assert_eq!(v.crosstalk, 0.0);
     }
 }
-
