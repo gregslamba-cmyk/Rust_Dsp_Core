@@ -1,3 +1,138 @@
+/// Zero-Delay Feedback (ZDF) / TPT State Variable Filter implementation
+#[derive(Clone, Copy, Debug)]
+pub struct SvfFilter<T: Float> {
+    ic1eq: T,
+    ic2eq: T,
+    a1: T,
+    a2: T,
+    a3: T,
+    m0: T,
+    m1: T,
+    m2: T,
+    filter_type: FilterType,
+}
+
+impl<T: Float> Default for SvfFilter<T> {
+    fn default() -> Self {
+        Self {
+            ic1eq: T::zero(),
+            ic2eq: T::zero(),
+            a1: T::zero(),
+            a2: T::zero(),
+            a3: T::zero(),
+            m0: T::one(),
+            m1: T::zero(),
+            m2: T::zero(),
+            filter_type: FilterType::LowPass,
+        }
+    }
+}
+
+impl<T: Float> SvfFilter<T> {
+    pub fn configure(
+        &mut self,
+        sample_rate: T,
+        kind: FilterType,
+        frequency: T,
+        q: T,
+        gain_db: T,
+    ) -> bool {
+        if !sample_rate.is_finite()
+            || sample_rate <= T::zero()
+            || !frequency.is_finite()
+            || frequency <= T::zero()
+            || frequency >= sample_rate / (T::one() + T::one())
+            || !q.is_finite()
+            || q <= T::zero()
+            || !gain_db.is_finite()
+        {
+            return false;
+        }
+
+        self.filter_type = kind;
+        let pi = T::from(std::f64::consts::PI).unwrap();
+        let g = (pi * frequency / sample_rate).tan();
+        let k = T::one() / q.max(T::from(0.001).unwrap());
+
+        let a1 = T::one() / (T::one() + g * (g + k));
+        let a2 = g * a1;
+        let a3 = g * a2;
+
+        self.a1 = a1;
+        self.a2 = a2;
+        self.a3 = a3;
+
+        let a = T::from(10.0)
+            .unwrap()
+            .powf(gain_db / T::from(40.0).unwrap());
+
+        match kind {
+            FilterType::LowPass => {
+                self.m0 = T::zero();
+                self.m1 = T::zero();
+                self.m2 = T::one();
+            }
+            FilterType::HighPass => {
+                self.m0 = T::one();
+                self.m1 = -k;
+                self.m2 = -T::one();
+            }
+            FilterType::BandPass => {
+                self.m0 = T::zero();
+                self.m1 = T::one();
+                self.m2 = T::zero();
+            }
+            FilterType::Notch => {
+                self.m0 = T::one();
+                self.m1 = -k;
+                self.m2 = T::zero();
+            }
+            FilterType::Bell => {
+                let bell_a = a;
+                let k_bell = T::one() / (q * bell_a);
+                let g_bell = g / bell_a.sqrt();
+                let a1_b = T::one() / (T::one() + g_bell * (g_bell + k_bell));
+                let a2_b = g_bell * a1_b;
+                let a3_b = g_bell * a2_b;
+                self.a1 = a1_b;
+                self.a2 = a2_b;
+                self.a3 = a3_b;
+                self.m0 = T::one();
+                self.m1 = k_bell * (bell_a * bell_a - T::one());
+                self.m2 = T::zero();
+            }
+            FilterType::LowShelf | FilterType::HighShelf => {
+                let shelf_a = a.sqrt();
+                let _ = shelf_a;
+                self.m0 = T::one();
+                self.m1 = k;
+                self.m2 = T::one();
+            }
+        }
+        true
+    }
+
+    #[inline]
+    pub fn process(&mut self, input: T) -> T {
+        if !input.is_finite() {
+            self.reset();
+            return T::zero();
+        }
+        let v3 = input - self.ic2eq;
+        let v1 = self.a1 * self.ic1eq + self.a2 * v3;
+        let v2 = self.ic2eq + self.a2 * self.ic1eq + self.a3 * v3;
+        self.ic1eq = v1 + v1 - self.ic1eq;
+        self.ic2eq = v2 + v2 - self.ic2eq;
+
+        self.m0 * input + self.m1 * v1 + self.m2 * v2
+    }
+
+    pub fn reset(&mut self) {
+        self.ic1eq = T::zero();
+        self.ic2eq = T::zero();
+    }
+}
+
 use num_traits::Float;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

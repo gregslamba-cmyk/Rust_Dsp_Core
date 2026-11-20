@@ -1,7 +1,8 @@
 use num_traits::Float;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RoutingMode {
+    #[default]
     Mono,
     Stereo,
     DualMono,
@@ -13,6 +14,80 @@ pub enum RoutingMode {
 pub struct StereoFrame<T> {
     pub left: T,
     pub right: T,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RoutingMatrix {
+    channel_count: usize,
+    mode: RoutingMode,
+}
+
+impl RoutingMatrix {
+    pub fn configure(&mut self, channel_count: usize, mode: RoutingMode) -> bool {
+        if !(1..=8).contains(&channel_count) {
+            return false;
+        }
+        self.channel_count = channel_count;
+        self.mode = mode;
+        true
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channel_count
+    }
+
+    pub fn mode(&self) -> RoutingMode {
+        self.mode
+    }
+
+    pub fn accepts_frame<T>(&self, channels: &[T]) -> bool {
+        channels.len() == self.channel_count
+    }
+
+    pub fn encode_input<T: Float>(&self, channels: &mut [T]) -> bool {
+        if !self.accepts_frame(channels) {
+            return false;
+        }
+        if self.mode == RoutingMode::MidSide && channels.len() == 2 {
+            let frame = StereoFrame {
+                left: channels[0],
+                right: channels[1],
+            }
+            .route(RoutingMode::MidSide);
+            channels[0] = frame.left;
+            channels[1] = frame.right;
+        }
+        true
+    }
+
+    pub fn decode_output<T: Float>(&self, channels: &mut [T]) -> bool {
+        if !self.accepts_frame(channels) {
+            return false;
+        }
+        if self.mode == RoutingMode::MidSide && channels.len() == 2 {
+            let frame = StereoFrame {
+                left: channels[0],
+                right: channels[1],
+            }
+            .from_mid_side();
+            channels[0] = frame.left;
+            channels[1] = frame.right;
+        }
+        true
+    }
+
+    pub fn sidechain_channel(
+        &self,
+        audio_channel: usize,
+        sidechain_channels: usize,
+    ) -> Option<usize> {
+        match sidechain_channels {
+            0 => None,
+            1 => Some(0),
+            count if audio_channel < count => Some(audio_channel),
+            _ => None,
+        }
+    }
 }
 
 pub fn route_channels<T: Float>(channels: &mut [T], mode: RoutingMode) {
@@ -101,7 +176,28 @@ impl<T: Float> StereoFrame<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RoutingMode, StereoFrame};
+    use super::{RoutingMatrix, RoutingMode, StereoFrame};
+
+    #[test]
+    fn shared_matrix_checks_supported_layouts_and_routes_stereo_modes() {
+        let mut matrix = RoutingMatrix::default();
+        assert!(matrix.configure(2, RoutingMode::MidSide));
+        let original = [0.75_f32, -0.25];
+        let mut encoded = original;
+        assert!(matrix.encode_input(&mut encoded));
+        assert_ne!(encoded, original);
+        assert!(matrix.decode_output(&mut encoded));
+        for (actual, expected) in encoded.into_iter().zip(original) {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
+
+        assert!(matrix.configure(8, RoutingMode::Multichannel));
+        assert!(!matrix.accepts_frame(&[0.0_f32; 6]));
+        assert!(matrix.accepts_frame(&[0.0_f32; 8]));
+        assert_eq!(matrix.sidechain_channel(7, 1), Some(0));
+        assert_eq!(matrix.sidechain_channel(7, 2), None);
+        assert_eq!(matrix.sidechain_channel(0, 0), None);
+    }
 
     #[test]
     fn mid_side_round_trip_preserves_stereo_frame() {

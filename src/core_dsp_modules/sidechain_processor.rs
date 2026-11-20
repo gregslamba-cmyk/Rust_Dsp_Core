@@ -31,45 +31,6 @@ pub struct SidechainProcessor<T: Float> {
     listen: bool,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{SidechainFilter, SidechainProcessor};
-
-    #[test]
-    fn external_key_is_selected_and_invalid_external_falls_back_to_internal() {
-        let mut processor = SidechainProcessor::<f32>::default();
-        assert!(processor.configure(
-            48_000.0,
-            SidechainFilter::LowPass.into(),
-            1_000.0,
-            0.707,
-            0.0
-        ));
-        processor.set_listen(true);
-
-        assert!(processor.process_key(0.25, Some(-0.5), true) < 0.0);
-        processor.reset();
-        assert!(processor.process_key(0.25, Some(f32::NAN), true) > 0.0);
-        processor.set_listen(false);
-        assert!(processor.process_key(-0.25, Some(0.5), false) > 0.0);
-    }
-
-    #[test]
-    fn exposes_supported_sidechain_filters() {
-        let filters = [
-            SidechainFilter::HighPass,
-            SidechainFilter::LowPass,
-            SidechainFilter::Bell,
-            SidechainFilter::LowShelf,
-            SidechainFilter::HighShelf,
-        ];
-        for filter in filters {
-            let mut processor = SidechainProcessor::<f32>::default();
-            assert!(processor.configure(48_000.0, filter.into(), 1_000.0, 0.707, 3.0));
-        }
-    }
-}
-
 impl<T: Float> Default for SidechainProcessor<T> {
     fn default() -> Self {
         Self {
@@ -131,3 +92,43 @@ impl<T: Float> SidechainProcessor<T> {
         self.filter.reset();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SidechainFilter, SidechainProcessor};
+
+    #[test]
+    fn external_key_is_selected_and_invalid_external_falls_back_to_internal() {
+        let mut processor = SidechainProcessor::<f32>::default();
+        assert!(processor.configure(
+            48_000.0,
+            SidechainFilter::LowPass.into(),
+            1_000.0,
+            0.707,
+            0.0
+        ));
+        processor.set_listen(true);
+
+        assert!(processor.process_key(0.25, Some(-0.5), true) < 0.0);
+        processor.reset();
+        assert!(processor.process_key(0.25, Some(f32::NAN), true) > 0.0);
+        processor.set_listen(false);
+        assert!(processor.process_key(-0.25, Some(0.5), false) > 0.0);
+    }
+
+    #[test]
+    fn exposes_supported_sidechain_filters() {
+        let filters = [
+            SidechainFilter::HighPass,
+            SidechainFilter::LowPass,
+            SidechainFilter::Bell,
+            SidechainFilter::LowShelf,
+            SidechainFilter::HighShelf,
+        ];
+        for filter in filters {
+            let mut processor = SidechainProcessor::<f32>::default();
+            assert!(processor.configure(48_000.0, filter.into(), 1_000.0, 0.707, 3.0));
+        }
+    }
+}
+
