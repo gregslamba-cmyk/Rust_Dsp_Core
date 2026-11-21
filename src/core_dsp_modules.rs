@@ -1,5 +1,7 @@
 pub mod analog_variance;
+pub mod fft_convolution;
 pub mod filters;
+pub mod linear_phase_fir;
 pub mod metering;
 pub mod nonlinear_stages;
 pub mod opto_compressor;

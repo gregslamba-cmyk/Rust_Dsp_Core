@@ -2,7 +2,8 @@ use num_traits::Float;
 
 use super::filters::{Biquad, FilterType};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+use nih_plug::prelude::Enum;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Enum)]
 pub enum SidechainFilter {
     #[default]
     HighPass,
