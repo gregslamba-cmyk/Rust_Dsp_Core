@@ -1,7 +1,21 @@
-/// Zero-Delay Feedback (ZDF) / TPT State Variable Filter implementation
+//! # Linear & Topology-Preserving Transform (TPT / ZDF) Filters
+//!
+//! Questo modulo implementa i blocchi di filtraggio standard e a retroazione a ritardo zero (Zero-Delay Feedback):
+//! - **`SvfFilter` (State Variable Filter ZDF):** Struttura TPT conforme al metodo Vadim Zavalishin / Andrew Simper.
+//!   Preserva la topologia dei circuiti analogici integratori a operazionali (SVF tipo Kerwin-Huelsman-Newcomb),
+//!   garantendo stabilità assoluta durante modulazioni veloci di frequenza (sweep e automazioni)
+//!   e risposte perfette senza distorsione di pre-warping bilaterale fino alla frequenza di Nyquist.
+//! - **`Biquad` (Forma Diretta II Trasposta):** Filtro biquad IIR a 2 poli e 2 zeri ottimizzato
+//!   secondo le formule RBJ Audio EQ Cookbook per il pre-filtraggio sidechain a basso consumo di CPU.
+
+/// Filtro State Variable a retroazione a ritardo zero (Zero-Delay Feedback / TPT).
+///
+/// Modella circuiti integratori analogici con risonanza precisa e assenza di discontinuità.
 #[derive(Clone, Copy, Debug)]
 pub struct SvfFilter<T: Float> {
+    /// Stato di memoria del primo integratore analogico (v1 eq).
     ic1eq: T,
+    /// Stato di memoria del secondo integratore analogico (v2 eq).
     ic2eq: T,
     a1: T,
     a2: T,
@@ -9,6 +23,7 @@ pub struct SvfFilter<T: Float> {
     m0: T,
     m1: T,
     m2: T,
+    /// Tipologia di filtro attiva (LP, HP, Bell, Shelf, Notch, BP).
     filter_type: FilterType,
 }
 

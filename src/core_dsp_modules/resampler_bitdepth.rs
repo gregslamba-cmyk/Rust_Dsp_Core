@@ -1,7 +1,29 @@
+//! # Anti-Aliasing Oversampling & Bit-Depth Dithering
+//!
+//! Questo modulo implementa il motore di sovracampionamento (oversampling) a fase lineare
+//! (1x, 2x, 4x, 8x) e quantizzazione con dithering TPDF (Triangular Probability Density Function)
+//! a 16 e 24 bit.
+//!
+//! ## Struttura dell'Oversampling Half-Band Polyphase
+//! L'elaborazione non lineare (saturazione a valvole, trasformatori, clipper) genera armoniche superiori
+//! che superano la frequenza di Nyquist ($f_s / 2$), ripiegandosi nello spettro udibile sotto forma di aliasing disarmonico.
+//! - **Filtro Half-Band a 31 Tap:** Filtro simmetrico di tipo I finestrato con curva Blackman, con risposta
+//!   piatta in banda passante e forte reiezione in banda oscura (> 70 dB).
+//! - **Stadi Multipli a Cascata:** L'oversampling 4x e 8x viene realizzato tramite cascata di stadi 2x successivi,
+//!   ottimizzando l'efficienza computazionale.
+//! - **Dichiarazione Esatta della Latenza:** Il ritardo di gruppo costante introdotto dal filtro FIR è:
+//!   - 1x: 0 campioni
+//!   - 2x: 15 campioni
+//!   - 4x: 22 campioni
+//!   - 8x: 25 campioni
+//! - **Real-Time Safety:** Nessuna allocazione heap nel thread audio; array e buffer circolari di dimensione fissa.
+
 use num_traits::Float;
 
+/// Numero di coefficienti (tap) per ciascun filtro halfband FIR a fase lineare simmetrico.
 const HALFBAND_TAPS: usize = 31;
 
+/// Ricampionatore polifase FIR a convoluzione diretta per upsampling e downsampling 2x.
 #[derive(Clone, Copy, Debug)]
 pub struct FirResampler<const TAPS: usize, T: Float> {
     coefficients: [T; TAPS],
@@ -9,15 +31,21 @@ pub struct FirResampler<const TAPS: usize, T: Float> {
     cursor: usize,
 }
 
+/// Fattore di moltiplicazione del campionamento per la soppressione dell'aliasing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OversamplingFactor {
+    /// Nessun sovracampionamento (1x, latenza 0).
     #[default]
     X1,
+    /// Sovracampionamento 2x (latenza 15 campioni).
     X2,
+    /// Sovracampionamento 4x (latenza 22 campioni).
     X4,
+    /// Sovracampionamento 8x (latenza 25 campioni).
     X8,
 }
 
+/// Singolo stadio di upsampling e downsampling a fattore 2x.
 #[derive(Clone, Copy, Debug)]
 struct OversamplingStage<T: Float> {
     upsampler: FirResampler<HALFBAND_TAPS, T>,
@@ -34,12 +62,14 @@ impl<T: Float> Default for OversamplingStage<T> {
     }
 }
 
+/// Motore modulare di oversampling multi-stadio fino a 8x.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Oversampler<T: Float> {
     stages: [OversamplingStage<T>; 3],
 }
 
 impl<T: Float> Oversampler<T> {
+    /// Resetta la memoria di tutti i filtri FIR halfband a cascata.
     pub fn reset(&mut self) {
         for stage in &mut self.stages {
             stage.upsampler.reset();
@@ -47,6 +77,7 @@ impl<T: Float> Oversampler<T> {
         }
     }
 
+    /// Restituisce la latenza algoritmica esatta in campioni introdotta dal ritardo di gruppo dei filtri FIR.
     pub fn latency_samples(factor: OversamplingFactor) -> u32 {
         match factor {
             OversamplingFactor::X1 => 0,
@@ -56,6 +87,12 @@ impl<T: Float> Oversampler<T> {
         }
     }
 
+    /// Applica una funzione non lineare all'interno del dominio sovracampionato, filtrando l'aliasing.
+    ///
+    /// # Parametri
+    /// - `input`: Campione audio a frequenza nativa.
+    /// - `factor`: Fattore di oversampling (1x, 2x, 4x, 8x).
+    /// - `nonlinear`: Chiusura contenente lo stadio di saturazione o distorsione non lineare da processare.
     #[inline]
     pub fn process<F>(&mut self, input: T, factor: OversamplingFactor, mut nonlinear: F) -> T
     where
@@ -64,10 +101,12 @@ impl<T: Float> Oversampler<T> {
         match factor {
             OversamplingFactor::X1 => nonlinear(input),
             OversamplingFactor::X2 => {
+                // Upsampling 2x con interpolazione halfband
                 let mut samples = self.stages[0].upsampler.upsample_2x(input);
                 for sample in &mut samples {
                     *sample = nonlinear(*sample);
                 }
+                // Decimazione 2x con filtro passa-basso anti-aliasing
                 self.stages[0].downsampler.downsample_2x(samples)
             }
             OversamplingFactor::X4 | OversamplingFactor::X8 => {
@@ -81,10 +120,12 @@ impl<T: Float> Oversampler<T> {
                     count *= 2;
                 }
 
+                // Esecuzione dello stadio non lineare all'alta frequenza di campionamento
                 for sample in &mut samples[..count] {
                     *sample = nonlinear(*sample);
                 }
 
+                // Filtraggio anti-aliasing e decimazione a cascata
                 if factor == OversamplingFactor::X8 {
                     samples = downsample_stage(&mut self.stages[2].downsampler, &samples, count);
                     count /= 2;

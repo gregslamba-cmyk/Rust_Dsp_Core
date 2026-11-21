@@ -6,8 +6,6 @@
 //! - Zero heap allocations, wait-free real-time audio processing in `f64`.
 //! - Strict latency reporting (`latency_samples(&self) -> u32`).
 
-use std::sync::Arc;
-
 /// Filter configuration type for symmetric linear-phase FIR filtering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FirFilterType {
@@ -246,12 +244,7 @@ pub struct LinearPhaseCrossover {
 
 impl LinearPhaseCrossover {
     /// Helper to design a low-pass filter kernel normalized to unity DC gain.
-    fn design_lowpass(
-        num_taps: usize,
-        latency: usize,
-        sample_rate: f64,
-        cutoff: f64,
-    ) -> Vec<f64> {
+    fn design_lowpass(num_taps: usize, latency: usize, sample_rate: f64, cutoff: f64) -> Vec<f64> {
         let omega = (std::f64::consts::PI * 2.0 * cutoff) / sample_rate;
         let m = latency as f64;
         let denom = (num_taps - 1) as f64;
@@ -306,12 +299,7 @@ impl LinearPhaseCrossover {
     }
 
     /// Creates a 3-band linear-phase crossover (Low, Mid, High).
-    pub fn new_3band(
-        sample_rate: f64,
-        low_split: f64,
-        high_split: f64,
-        num_taps: usize,
-    ) -> Self {
+    pub fn new_3band(sample_rate: f64, low_split: f64, high_split: f64, num_taps: usize) -> Self {
         let mut taps = num_taps.max(31);
         if taps % 2 == 0 {
             taps += 1;
@@ -341,13 +329,7 @@ impl LinearPhaseCrossover {
     }
 
     /// Creates a 4-band linear-phase crossover (Low, Low-Mid, High-Mid, High).
-    pub fn new_4band(
-        sample_rate: f64,
-        f1: f64,
-        f2: f64,
-        f3: f64,
-        num_taps: usize,
-    ) -> Self {
+    pub fn new_4band(sample_rate: f64, f1: f64, f2: f64, f3: f64, num_taps: usize) -> Self {
         let mut taps = num_taps.max(31);
         if taps % 2 == 0 {
             taps += 1;
@@ -434,7 +416,14 @@ mod tests {
     #[test]
     fn linear_phase_filter_silence_at_rest() {
         let mut filter = LinearPhaseFilter::new(63);
-        assert!(filter.configure(48000.0, FirFilterType::LowPass, 1000.0, 0.707, 0.0, FirWindow::Blackman));
+        assert!(filter.configure(
+            48000.0,
+            FirFilterType::LowPass,
+            1000.0,
+            0.707,
+            0.0,
+            FirWindow::Blackman
+        ));
         filter.reset();
 
         for _ in 0..256 {
@@ -445,7 +434,14 @@ mod tests {
     #[test]
     fn linear_phase_filter_sanitizes_nan_and_inf() {
         let mut filter = LinearPhaseFilter::new(63);
-        filter.configure(48000.0, FirFilterType::HighPass, 2000.0, 0.707, 0.0, FirWindow::Blackman);
+        filter.configure(
+            48000.0,
+            FirFilterType::HighPass,
+            2000.0,
+            0.707,
+            0.0,
+            FirWindow::Blackman,
+        );
         filter.reset();
 
         assert_eq!(filter.process_sample(f64::NAN), 0.0);
@@ -475,7 +471,7 @@ mod tests {
 
         // Feed an impulse at t=0
         xover.process_sample(1.0, &mut outputs);
-        let mut sum_at_t0 = outputs.iter().sum::<f64>();
+        let sum_at_t0 = outputs.iter().sum::<f64>();
 
         let mut sum_delayed = 0.0;
         for t in 1..=latency + 10 {
@@ -486,7 +482,10 @@ mod tests {
         }
 
         // Sum across bands at latency sample must be exactly 1.0 (perfect reconstruction)
-        assert!((sum_delayed - 1.0).abs() < 1e-4, "Reconstruction error: {sum_delayed}");
+        assert!(
+            (sum_delayed - 1.0).abs() < 1e-4,
+            "Reconstruction error: {sum_delayed}"
+        );
         assert!(sum_at_t0.abs() < 1e-4);
     }
 
@@ -500,9 +499,7 @@ mod tests {
         let mut outputs = [0.0; 4];
 
         // Feed arbitrary signal and check that sum of bands equals input delayed by latency
-        let test_inputs: Vec<f64> = (0..500)
-            .map(|i| (i as f64 * 0.1).sin() * 0.8)
-            .collect();
+        let test_inputs: Vec<f64> = (0..500).map(|i| (i as f64 * 0.1).sin() * 0.8).collect();
         let mut reconstructed = Vec::with_capacity(test_inputs.len());
 
         for &in_s in &test_inputs {

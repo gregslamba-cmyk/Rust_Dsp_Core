@@ -1,28 +1,62 @@
+//! # Multi-Channel Routing Matrix & Mid/Side Processing
+//!
+//! Questo modulo gestisce la topologia di instradamento del segnale per l'intera suite,
+//! supportando formati Mono, Stereo L/R, Dual Mono, Mid/Side (M/S) e Multicanale fino a 8 canali.
+//!
+//! ## Matrice Mid/Side Ortonormale
+//! Per la codifica e decodifica M/S viene applicata la matrice ortonormale con fattore di scala
+//! $1/\sqrt{2} \approx 0.7071$:
+//! - Codifica: $M = (L + R) / \sqrt{2}$, $S = (L - R) / \sqrt{2}$
+//! - Decodifica: $L = (M + S) / \sqrt{2}$, $R = (M - S) / \sqrt{2}$
+//!
+//! Questa formulazione preserva esattamente l'energia totale e la potenza RMS del segnale
+//! in una trasformazione di andata e ritorno ($L^2 + R^2 = M^2 + S^2$).
+//!
+//! ## Inversione di Polarità
+//! Supporto per inversione di fase a 180° per canale indipendente o linkata a latenza zero.
+
 use num_traits::Float;
 
+/// Modalità di instradamento audio per canale e campo stereo.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RoutingMode {
+    /// Mono: somma e distribuzione identica su entrambi i canali.
     #[default]
     Mono,
+    /// Stereo: elaborazione standard Left e Right accoppiata.
     Stereo,
+    /// Dual Mono: canali indipendenti con detector e gain reduction separati.
     DualMono,
+    /// Mid/Side: scomposizione ortonormale in componente centrale (Mid) e laterale (Side).
     MidSide,
+    /// Multicanale: instradamento trasparente per layout N-canali (surround/3D).
     Multichannel,
 }
 
+/// Coppia di campioni stereo Left e Right generica su tipo float.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StereoFrame<T> {
+    /// Campione canale sinistro o componente Mid.
     pub left: T,
+    /// Campione canale destro o componente Side.
     pub right: T,
 }
 
+/// Matrice di instradamento e mappatura canali per il blocco audio.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RoutingMatrix {
+    /// Numero di canali audio configurati (da 1 a 8).
     channel_count: usize,
+    /// Modalità di routing attiva.
     mode: RoutingMode,
 }
 
 impl RoutingMatrix {
+    /// Configura il numero di canali e la modalità operativa della matrice.
+    ///
+    /// # Parametri
+    /// - `channel_count`: Numero di canali (supportati da 1 a 8).
+    /// - `mode`: Modalità di instradamento desiderata.
     pub fn configure(&mut self, channel_count: usize, mode: RoutingMode) -> bool {
         if !(1..=8).contains(&channel_count) {
             return false;
@@ -32,18 +66,22 @@ impl RoutingMatrix {
         true
     }
 
+    /// Restituisce il numero di canali attualmente attivi nella matrice.
     pub fn channel_count(&self) -> usize {
         self.channel_count
     }
 
+    /// Restituisce la modalità di routing attualmente configurata.
     pub fn mode(&self) -> RoutingMode {
         self.mode
     }
 
+    /// Verifica se il frame in ingresso soddisfa il numero di canali configurato.
     pub fn accepts_frame<T>(&self, channels: &[T]) -> bool {
         channels.len() == self.channel_count
     }
 
+    /// Esegue la codifica in ingresso (es. da L/R a M/S) direttamente sui campioni del buffer.
     pub fn encode_input<T: Float>(&self, channels: &mut [T]) -> bool {
         if !self.accepts_frame(channels) {
             return false;
@@ -60,6 +98,7 @@ impl RoutingMatrix {
         true
     }
 
+    /// Esegue la decodifica in uscita (es. da M/S a L/R) ripristinando il dominio originale.
     pub fn decode_output<T: Float>(&self, channels: &mut [T]) -> bool {
         if !self.accepts_frame(channels) {
             return false;
@@ -76,6 +115,7 @@ impl RoutingMatrix {
         true
     }
 
+    /// Determina l'indice del canale sidechain da associare a un determinato canale audio primario.
     pub fn sidechain_channel(
         &self,
         audio_channel: usize,
@@ -90,9 +130,11 @@ impl RoutingMatrix {
     }
 }
 
+/// Applica la modalità di routing specificata a uno slice multicanale di campioni.
 pub fn route_channels<T: Float>(channels: &mut [T], mode: RoutingMode) {
     match mode {
         RoutingMode::Mono if !channels.is_empty() => {
+            // Media aritmetica su tutti i canali per generare la somma mono coerente
             let sum = channels
                 .iter()
                 .copied()
@@ -101,6 +143,7 @@ pub fn route_channels<T: Float>(channels: &mut [T], mode: RoutingMode) {
             channels.fill(mono);
         }
         RoutingMode::MidSide => {
+            // Codifica a coppie stereo applicando la rotazione ortonormale a 45 gradi
             for pair in channels.as_chunks_mut::<2>().0 {
                 let frame = StereoFrame {
                     left: pair[0],
@@ -118,6 +161,7 @@ pub fn route_channels<T: Float>(channels: &mut [T], mode: RoutingMode) {
     }
 }
 
+/// Decodifica uno slice di canali dal formato Mid/Side al formato Stereo Left/Right.
 pub fn decode_mid_side_channels<T: Float>(channels: &mut [T]) {
     for pair in channels.as_chunks_mut::<2>().0 {
         let frame = StereoFrame {
@@ -131,10 +175,12 @@ pub fn decode_mid_side_channels<T: Float>(channels: &mut [T]) {
 }
 
 impl<T: Float> StereoFrame<T> {
+    /// Applica la trasformazione di routing alla coppia stereo.
     #[inline]
     pub fn route(self, mode: RoutingMode) -> Self {
         match mode {
             RoutingMode::Mono => {
+                // Somma mono normalizzata a -6 dB per canale: (L + R) / 2
                 let mono = (self.left + self.right) / (T::one() + T::one());
                 Self {
                     left: mono,
@@ -143,6 +189,7 @@ impl<T: Float> StereoFrame<T> {
             }
             RoutingMode::Stereo | RoutingMode::DualMono | RoutingMode::Multichannel => self,
             RoutingMode::MidSide => {
+                // Fattore di scala ortonormale: 1 / sqrt(2) preserva la potenza totale del segnale
                 let scale = T::one() / (T::one() + T::one()).sqrt();
                 Self {
                     left: (self.left + self.right) * scale,
@@ -152,8 +199,10 @@ impl<T: Float> StereoFrame<T> {
         }
     }
 
+    /// Ricostruisce i canali Left e Right a partire dalle componenti Mid e Side.
     #[inline]
     pub fn from_mid_side(self) -> Self {
+        // Matrice inversa ortonormale: L = (M + S) / sqrt(2), R = (M - S) / sqrt(2)
         let scale = T::one() / (T::one() + T::one()).sqrt();
         Self {
             left: (self.left + self.right) * scale,
@@ -161,6 +210,7 @@ impl<T: Float> StereoFrame<T> {
         }
     }
 
+    /// Inverte la polarità (0° / 180°) dei canali Left e Right indipendentemente.
     #[inline]
     pub fn invert_phase(self, invert_left: bool, invert_right: bool) -> Self {
         Self {

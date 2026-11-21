@@ -1,20 +1,46 @@
+//! # Variable-Mu Tube Compression & Time Constant Network (Fairchild 670/660)
+//!
+//! Questo modulo emula la risposta circuitale dei compressori/limiter valvolari Vari-Mu
+//! (in particolare il leggendario Fairchild 670 stereo e 660 mono), basati sulla modulazione
+//! dinamica del punto di lavoro di tubi termoionici a cut-off remoto (come i doppi triodi 6386).
+//!
+//! ## Topologia Circuitale Emulata
+//! - **Controllo di Guadagno Vari-Mu:** Il segnale audio rettificato genera una tensione negativa di bias DC
+//!   inviata alle griglie di controllo delle valvole. All'aumentare dell'ampiezza, la transconduttanza ($g_m$)
+//!   del tubo diminuisce progressivamente, realizzando una compressione fluida a rapporto continuamente variabile
+//!   (da ~2:1 per lievi riduzioni fino a oltre 20:1 per picchi intensi).
+//! - **Rete di Costanti Temporali (Time Constants I–VI):** Modella le 6 posizioni dell'hardware originale,
+//!   comprese le posizioni composte V e VI con recupero a due stadi (rilascio rapido sui picchi brevi e
+//!   rilascio prolungato fino a 25 secondi su passaggi ad alta energia continua).
+//! - **Attacco Rapido:** Attacco nominale di ~200 µs (0.2 ms) per catturare i transienti più ripidi
+//!   senza artefatti digitali di clipping.
+
 use num_traits::Float;
 
+/// Tempo di attacco nominale storico del circuito Vari-Mu (~0.2 ms / 200 microsecondi).
 pub const VARI_MU_ATTACK_SECONDS: f64 = 0.0002;
 
+/// Le sei posizioni storiche del selettore di costante temporale del Fairchild 670/660.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum TimeConstant {
+    /// Posizione I: Rilascio veloce fisso di 0.3 s.
     #[default]
     I,
+    /// Posizione II: Rilascio medio-veloce fisso di 0.8 s.
     II,
+    /// Posizione III: Rilascio medio fisso di 2.0 s.
     III,
+    /// Posizione IV: Rilascio lento fisso di 5.0 s.
     IV,
+    /// Posizione V: Rilascio automatico a doppio stadio (2.0 s per il primo 50%, coda lenta da 10.0 s).
     V,
+    /// Posizione VI: Rilascio automatico a doppio stadio dipendente dal programma (0.3 s per il primo 50%, coda lenta da 25.0 s).
     VI,
 }
 
 impl TimeConstant {
+    /// Restituisce la coppia di costanti di tempo (rilascio veloce, rilascio lento opzionale) in secondi.
     fn release_seconds<T: Float>(self) -> (T, Option<T>) {
         let (first, second) = match self {
             Self::I => (0.3, None),
@@ -31,13 +57,22 @@ impl TimeConstant {
     }
 }
 
+/// Simulatore del circuito di rilevamento e controllo guadagno Vari-Mu.
+///
+/// Modella la pendenza progressiva di compressione e la rete temporale RC delle griglie.
 #[derive(Clone, Copy, Debug)]
 pub struct VariMuCell<T: Float> {
+    /// Frequenza di campionamento attiva in Hz.
     sample_rate: T,
+    /// Livello lineare dell'inviluppo del detector rettificato.
     envelope: T,
+    /// Riduzione di guadagno istantanea corrente in dB positivi.
     gain_reduction_db: T,
+    /// Riduzione in dB memorizzata all'inizio dell'evento di rilascio.
     release_start_db: T,
+    /// Flag indicante se il rilascio si trova nella seconda fase lenta (per le posizioni V e VI).
     in_slow_release: bool,
+    /// Posizione attiva della costante temporale (I–VI).
     time_constant: TimeConstant,
 }
 
@@ -55,6 +90,11 @@ impl<T: Float> Default for VariMuCell<T> {
 }
 
 impl<T: Float> VariMuCell<T> {
+    /// Inizializza la cella Vari-Mu configurando frequenza di campionamento e costante temporale.
+    ///
+    /// # Parametri
+    /// - `sample_rate`: Frequenza di campionamento in Hz (> 0.0).
+    /// - `time_constant`: Costante temporale iniziale (I–VI).
     pub fn initialize(&mut self, sample_rate: T, time_constant: TimeConstant) -> bool {
         if !sample_rate.is_finite() || sample_rate <= T::zero() {
             return false;
@@ -65,6 +105,7 @@ impl<T: Float> VariMuCell<T> {
         true
     }
 
+    /// Modifica la costante temporale attiva senza resettare bruscamente l'inviluppo audio.
     pub fn set_time_constant(&mut self, time_constant: TimeConstant) {
         if self.time_constant != time_constant {
             self.time_constant = time_constant;
@@ -73,6 +114,14 @@ impl<T: Float> VariMuCell<T> {
         }
     }
 
+    /// Esegue il rilevamento del segnale e calcola la riduzione di guadagno in dB istante per istante.
+    ///
+    /// # Parametri
+    /// - `detector_level`: Ampiezza lineare assoluta del segnale nel percorso sidechain.
+    /// - `threshold_db`: Soglia di inizio compressione in dBFS (tipicamente -30.0 .. 0.0 dB).
+    ///
+    /// # Restituisce
+    /// Attenuazione istantanea in dB (valore >= 0.0).
     #[inline]
     pub fn process(&mut self, detector_level: T, threshold_db: T) -> T {
         if !self.sample_rate.is_finite() || self.sample_rate <= T::zero() {
@@ -89,34 +138,47 @@ impl<T: Float> VariMuCell<T> {
         } else {
             T::zero()
         };
+
+        // Inseguimento rapido del picco di tensione rettificata sulle griglie del tubo
         if detector_level > self.envelope {
+            // Calcolo del polo di attacco: alpha = exp(-1 / (fs * t_attack))
             let attack =
                 (-T::one() / (self.sample_rate * T::from(VARI_MU_ATTACK_SECONDS).unwrap())).exp();
             self.envelope = detector_level + attack * (self.envelope - detector_level);
         } else {
+            // Rilascio dell'inviluppo primario pilotato dalla rete RC di scarica successiva
             self.envelope = detector_level;
         }
 
+        // Conversione dell'inviluppo di tensione in dBFS (con floor di sicurezza a -240 dBFS)
         let level_db =
             T::from(20.0).unwrap() * self.envelope.max(T::from(1.0e-12).unwrap()).log10();
+        // Calcolo della riduzione teorica non lineare secondo la caratteristica curva Vari-Mu
         let target = vari_mu_target_reduction_db(level_db, threshold_db);
+
+        // FASE DI ATTACCO: la tensione di bias negativo aumenta, riducendo il guadagno delle valvole
         if target >= self.gain_reduction_db {
             self.release_start_db = T::zero();
             self.in_slow_release = false;
             let attack =
                 (-T::one() / (self.sample_rate * T::from(VARI_MU_ATTACK_SECONDS).unwrap())).exp();
             self.gain_reduction_db = target + attack * (self.gain_reduction_db - target);
+
+        // FASE DI RILASCIO: la carica accumulata nelle capacità di griglia decade secondo le costanti I-VI
         } else {
             if self.release_start_db <= T::zero() {
                 self.release_start_db = self.gain_reduction_db;
             }
             let (fast_release, slow_release) = self.time_constant.release_seconds::<T>();
+
+            // Per le costanti V e VI, dopo aver recuperato il primo 50% di dB si entra nella fase di coda lenta
             if !self.in_slow_release
                 && slow_release.is_some()
                 && self.gain_reduction_db <= self.release_start_db * T::from(0.5).unwrap()
             {
                 self.in_slow_release = true;
             }
+
             let release = if self.in_slow_release {
                 slow_release.unwrap_or(fast_release)
             } else {
@@ -128,6 +190,7 @@ impl<T: Float> VariMuCell<T> {
         self.gain_reduction_db
     }
 
+    /// Resetta a riposo tutti i condensatori e l'inviluppo del detector Vari-Mu.
     pub fn reset(&mut self) {
         self.envelope = T::zero();
         self.gain_reduction_db = T::zero();
@@ -136,23 +199,36 @@ impl<T: Float> VariMuCell<T> {
     }
 }
 
+/// Calcola la riduzione statica di guadagno in dB applicando la caratteristica curva Vari-Mu.
+///
+/// Modella il comportamento delle valvole a cut-off remoto con rapporto di compressione
+/// che aumenta dolcemente da 2:1 a 20:1 all'aumentare dell'escursione sopra la soglia.
+///
+/// # Parametri
+/// - `input_level_db`: Livello del segnale audio in dB.
+/// - `threshold_db`: Livello di soglia in dB.
 pub fn vari_mu_target_reduction_db<T: Float>(input_level_db: T, threshold_db: T) -> T {
     if !input_level_db.is_finite() || !threshold_db.is_finite() {
         return T::zero();
     }
 
     let over_threshold = input_level_db - threshold_db;
-    let knee = T::from(2.0).unwrap();
+    let knee = T::from(2.0).unwrap(); // Ginocchio morbido progressivo di 4 dB (±2 dB)
     if over_threshold <= -knee {
         return T::zero();
     }
 
     let over = over_threshold.max(T::zero());
-    let knee_progress = ((over_threshold + knee) / (knee + knee)).min(T::one());
+    // Rapporto di compressione non lineare asintotico: ratio = 2.0 + 18.0 * (1 - exp(-over / 18.0))
+    // Produce un ratio che varia gradualmente da 2:1 (piccole escursioni) a 20:1 (forti picchi)
     let ratio = T::from(2.0).unwrap()
         + T::from(18.0).unwrap() * (T::one() - (-over / T::from(18.0).unwrap()).exp());
+    // Attenuazione: delta_dB = over * (1 - 1 / ratio)
     let reduction = over * (T::one() - T::one() / ratio);
+
+    // Raccordo parabolico morbido nella regione del knee per garantire continuità senza scalini
     if over_threshold < knee {
+        let knee_progress = ((over_threshold + knee) / (knee + knee)).min(T::one());
         reduction * knee_progress * knee_progress
     } else {
         reduction

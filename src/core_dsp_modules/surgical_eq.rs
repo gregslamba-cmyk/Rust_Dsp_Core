@@ -1,15 +1,37 @@
+//! # Surgical Equalizer Engine (Minimum Phase & Linear Phase)
+//!
+//! Questo modulo fornisce il motore di equalizzazione parametrica a 10 bande per il plugin `greg-surgical-eq`,
+//! con commutazione tra due modalità di fase:
+//!
+//! ## Modalità di Fase Supportate
+//! 1. **`MinimumPhase` (Fase Minima - Latenza Zero):**
+//!    Cascata seriale di filtri biquad IIR a 2 poli e 2 zeri. Preserva la risposta immediata priva di latenza,
+//!    ideale per tracking e registrazione live, con rotazione di fase analog-style.
+//! 2. **`LinearPhase` (Fase Lineare FIR Simmetrico):**
+//!    Sintesi analitica di un filtro FIR simmetrico di tipo I (con lunghezza dispari, es. 257 tap)
+//!    ottenuto per campionamento in frequenza e IFFT della curva di ampiezza composita di tutte le bande attive.
+//!    - **Vantaggio Acustico:** Fase perfettamente lineare, zero alterazione delle relazioni di fase tra microfoni multipli
+//!      (es. batteria e riprese acustiche complesse).
+//!    - **Latenza Dichiarata Esatta:** Ritardo di gruppo rigorosamente costante pari a $M = (N - 1) / 2$ campioni (es. 128 campioni a 257 tap).
+
 use num_traits::Float;
 
 use super::filters::{Biquad, FilterType};
 
 const MAX_LINEAR_PHASE_TAPS: usize = 513;
 
+/// Parametri descrittivi per una singola banda di equalizzazione parametrica.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EqBand<T: Float> {
+    /// Flag di attivazione della banda.
     pub enabled: bool,
+    /// Tipologia di filtro (Bell, LowShelf, HighShelf, HighPass, LowPass, Notch, BandPass).
     pub kind: FilterType,
+    /// Frequenza di taglio o centrale in Hz (range: 20.0 .. 20_000.0 Hz).
     pub frequency_hz: T,
+    /// Fattore di merito Q o ampiezza di banda (range: 0.1 .. 30.0).
     pub q: T,
+    /// Guadagno della banda in dB (range: -24.0 .. +24.0 dB).
     pub gain_db: T,
 }
 
@@ -25,9 +47,12 @@ impl<T: Float> Default for EqBand<T> {
     }
 }
 
+/// Modalità di fase dell'equalizzatore parametrico.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EqPhaseMode {
+    /// Fase minima analog-style: latenza zero campioni.
     MinimumPhase,
+    /// Fase lineare FIR: preserva le relazioni di fase, con latenza algoritmica fissa (N-1)/2.
     LinearPhase,
 }
 

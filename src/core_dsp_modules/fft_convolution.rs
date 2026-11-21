@@ -128,11 +128,7 @@ impl PartitionedConvolution {
             let mut freq_buf = vec![Complex::new(0.0, 0.0); self.complex_len];
             if self
                 .r2c
-                .process_with_scratch(
-                    &mut time_buf,
-                    &mut freq_buf,
-                    &mut self.r2c_scratch,
-                )
+                .process_with_scratch(&mut time_buf, &mut freq_buf, &mut self.r2c_scratch)
                 .is_err()
             {
                 return false;
@@ -208,10 +204,9 @@ impl PartitionedConvolution {
 
         for p in 0..num_p {
             let hist_idx = (head + num_p - (p % num_p)) % num_p;
-            if let (Some(x_spec), Some(h_spec)) = (
-                self.spectrum_history.get(hist_idx),
-                self.partitions.get(p),
-            ) {
+            if let (Some(x_spec), Some(h_spec)) =
+                (self.spectrum_history.get(hist_idx), self.partitions.get(p))
+            {
                 for (acc, (&x, &h)) in self
                     .accum_spectrum
                     .iter_mut()
@@ -633,10 +628,16 @@ mod tests {
         // Check that after initial filling latency (win), the signal is faithfully reconstructed
         let check_start = win * 2;
         let check_end = check_start + 512;
-        let in_rms: f64 = (inputs[check_start..check_end].iter().map(|x| x * x).sum::<f64>()
+        let in_rms: f64 = (inputs[check_start..check_end]
+            .iter()
+            .map(|x| x * x)
+            .sum::<f64>()
             / 512.0)
             .sqrt();
-        let out_rms: f64 = (outputs[check_start..check_end].iter().map(|x| x * x).sum::<f64>()
+        let out_rms: f64 = (outputs[check_start..check_end]
+            .iter()
+            .map(|x| x * x)
+            .sum::<f64>()
             / 512.0)
             .sqrt();
 

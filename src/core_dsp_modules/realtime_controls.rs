@@ -1,5 +1,14 @@
+//! # Real-Time Parameter Smoothing, Envelopes & Bypass Crossfade
+//!
+//! Questo modulo implementa le primitive fondamentali per il controllo real-time senza click:
+//! - **`EnvelopeFollower`:** Rilevatore d'inviluppo a due costanti di tempo (Attack/Release) con risposta esponenziale.
+//! - **`LinearSmoother`:** De-zippering lineare frame-by-frame per parametri soggetti ad automazione DAW.
+//! - **`BypassCrossfade`:** Micro-crossfade lineare continuo (tipicamente 5 ms) all'attivazione/disattivazione del bypass.
+//! - **`LatencyDelay`:** Linea di ritardo statica lock-free a dimensione costante per l'allineamento di fase del segnale Dry.
+
 use num_traits::Float;
 
+/// Rilevatore d'inviluppo di picco con costanti di tempo asimmetriche (Attack e Release).
 #[derive(Clone, Copy, Debug)]
 pub struct EnvelopeFollower<T: Float> {
     sample_rate: T,
@@ -20,6 +29,7 @@ impl<T: Float> Default for EnvelopeFollower<T> {
 }
 
 impl<T: Float> EnvelopeFollower<T> {
+    /// Inizializza il follower specificando frequenza di campionamento e tempi in secondi.
     pub fn initialize(&mut self, sample_rate: T, attack_seconds: T, release_seconds: T) -> bool {
         if !sample_rate.is_finite() || sample_rate <= T::zero() {
             return false;
@@ -28,6 +38,7 @@ impl<T: Float> EnvelopeFollower<T> {
         self.set_times(attack_seconds, release_seconds)
     }
 
+    /// Ricalcola i poli esponenziali di attacco e rilascio: $\alpha = \exp(-1 / (f_s \cdot \tau))$.
     pub fn set_times(&mut self, attack_seconds: T, release_seconds: T) -> bool {
         if !self.sample_rate.is_finite() || self.sample_rate <= T::zero() {
             return false;
@@ -37,6 +48,7 @@ impl<T: Float> EnvelopeFollower<T> {
         true
     }
 
+    /// Avanza l'inviluppo di un campione in base al valore assoluto di ampiezza in ingresso.
     #[inline]
     pub fn next(&mut self, level: T) -> T {
         if !level.is_finite() {
@@ -44,19 +56,24 @@ impl<T: Float> EnvelopeFollower<T> {
             return T::zero();
         }
         let level = level.abs();
+        // Selezione asimmetrica: coefficiente di attacco per livelli crescenti, di rilascio per livelli calanti
         let coefficient = if level > self.envelope {
             self.attack_coefficient
         } else {
             self.release_coefficient
         };
+        // Filtro esponenziale IIR a 1 polo: y[n] = x[n] + alpha * (y[n-1] - x[n])
         self.envelope = level + coefficient * (self.envelope - level);
         self.envelope
     }
 
+    /// Resetta a zero l'energia accumulata nell'inviluppo.
     pub fn reset(&mut self) {
         self.envelope = T::zero();
     }
 
+    /// Calcola il coefficiente di decadimento IIR per tempo e sample rate dati:
+    /// $\alpha = \exp(-1 / (\tau \cdot f_s))$
     fn coefficient(time_seconds: T, sample_rate: T) -> T {
         let minimum_time = T::from(1.0e-6).unwrap();
         let time_seconds = if time_seconds.is_finite() {
@@ -68,6 +85,7 @@ impl<T: Float> EnvelopeFollower<T> {
     }
 }
 
+/// Smussatore lineare per automazione parametri (de-zippering click-free).
 #[derive(Clone, Copy, Debug)]
 pub struct LinearSmoother<T: Float> {
     current: T,
@@ -88,6 +106,7 @@ impl<T: Float> Default for LinearSmoother<T> {
 }
 
 impl<T: Float> LinearSmoother<T> {
+    /// Resetta il parametro istantaneamente a un valore target senza rampa.
     pub fn reset(&mut self, value: T) {
         self.current = value;
         self.target = value;
@@ -95,6 +114,7 @@ impl<T: Float> LinearSmoother<T> {
         self.remaining = 0;
     }
 
+    /// Imposta un nuovo valore target da raggiungere linearmente in un numero specificato di campioni.
     pub fn set_target(&mut self, target: T, samples: u32) {
         if !target.is_finite() {
             return;
@@ -105,10 +125,12 @@ impl<T: Float> LinearSmoother<T> {
             self.current = target;
             self.step = T::zero();
         } else {
+            // Passo di incremento costante per campione: delta = (target - current) / samples
             self.step = (target - self.current) / T::from(samples).unwrap();
         }
     }
 
+    /// Avanza di un campione e restituisce il valore del parametro interpolato.
     #[inline]
     pub fn next_value(&mut self) -> T {
         if self.remaining > 0 {
@@ -122,6 +144,7 @@ impl<T: Float> LinearSmoother<T> {
     }
 }
 
+/// Gestore del crossfade micro-lineare per commutazioni di bypass prive di click.
 #[derive(Clone, Copy, Debug)]
 pub struct BypassCrossfade<T: Float> {
     mix: LinearSmoother<T>,
@@ -135,6 +158,7 @@ impl<T: Float> Default for BypassCrossfade<T> {
     }
 }
 
+/// Buffer circolare statico a dimensione fissa per l'allineamento di latenza algoritmica.
 #[derive(Clone, Copy, Debug)]
 pub struct LatencyDelay<T: Float, const MAX_DELAY: usize> {
     buffer: [T; MAX_DELAY],
@@ -153,6 +177,7 @@ impl<T: Float, const MAX_DELAY: usize> Default for LatencyDelay<T, MAX_DELAY> {
 }
 
 impl<T: Float, const MAX_DELAY: usize> LatencyDelay<T, MAX_DELAY> {
+    /// Configura il ritardo esatto in campioni (deve essere <= MAX_DELAY).
     pub fn set_delay_samples(&mut self, delay_samples: usize) -> bool {
         if delay_samples > MAX_DELAY {
             return false;
@@ -161,6 +186,7 @@ impl<T: Float, const MAX_DELAY: usize> LatencyDelay<T, MAX_DELAY> {
         true
     }
 
+    /// Inserisce un campione ed estrae il campione ritardato esattamente di `delay_samples` posizioni.
     #[inline]
     pub fn process(&mut self, input: T) -> T {
         if self.delay_samples == 0 {
@@ -168,12 +194,14 @@ impl<T: Float, const MAX_DELAY: usize> LatencyDelay<T, MAX_DELAY> {
         }
 
         self.buffer[self.cursor] = input;
+        // Calcolo dell'indice di lettura circolare con modulo a costo zero su array pre-allocato
         let read_index = (self.cursor + MAX_DELAY - self.delay_samples) % MAX_DELAY;
         let output = self.buffer[read_index];
         self.cursor = (self.cursor + 1) % MAX_DELAY;
         output
     }
 
+    /// Azzera la memoria del buffer di ritardo.
     pub fn reset(&mut self) {
         self.buffer.fill(T::zero());
         self.cursor = 0;
@@ -181,11 +209,14 @@ impl<T: Float, const MAX_DELAY: usize> LatencyDelay<T, MAX_DELAY> {
 }
 
 impl<T: Float> BypassCrossfade<T> {
+    /// Imposta lo stato di bypass con rampa di micro-crossfade (es. 5 ms = 240 campioni a 48 kHz).
     pub fn set_bypassed(&mut self, bypassed: bool, ramp_samples: u32) {
         self.mix
             .set_target(if bypassed { T::zero() } else { T::one() }, ramp_samples);
     }
 
+    /// Esegue il crossfade lineare tra segnale Dry (diretto) e Wet (elaborato dal DSP):
+    /// $y = \text{Dry} \cdot (1 - \text{mix}) + \text{Wet} \cdot \text{mix}$
     #[inline]
     pub fn process(&mut self, dry: T, wet: T) -> T {
         let wet_mix = self.mix.next_value();

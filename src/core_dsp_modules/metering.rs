@@ -1,32 +1,45 @@
+//! # Lock-Free Audio Metering & Phase Correlation Monitoring
+//!
+//! Questo modulo fornisce un'infrastruttura di misurazione audio in tempo reale ad alte prestazioni,
+//! priva di blocchi (`lock-free` e `wait-free`), progettata per monitorare i livelli di segnale
+//! senza interferire con il thread audio ad alta priorità.
+//!
+//! ## Metriche Calcolate
+//! - **Peak e True RMS di Ingresso e Uscita:** Misurazione istantanea in dBFS con floor a -120 dBFS.
+//!   Il calcolo RMS è calcolato matematicamente come media quadratica esatta: $\text{RMS} = \sqrt{\frac{1}{N}\sum x[n]^2}$.
+//! - **Gain Reduction Massima (dB):** Tracciamento del picco massimo di attenuazione introdotto da stadi di dinamica.
+//! - **Correlazione di Fase Stereo:** Coefficiente di correlazione di Pearson normalizzato tra i canali Left e Right:
+//!   $$r = \frac{\sum L \cdot R}{\sqrt{\sum L^2 \cdot \sum R^2}} \in [-1.0, +1.0]$$
+//!   (dove +1.0 indica correlazione perfetta in fase, 0.0 segnali ortogonali/decorrelati, e -1.0 controfase a 180°).
+//! - **Livello Sidechain:** Monitoraggio RMS e picco del bus di controllo ausiliario.
+//!
+//! ## Comunicazione Thread-Safe Audio -> UI
+//! I valori calcolati per blocco vengono serializzati e pubblicati tramite un array di registri atomici
+//! `[AtomicU32; 8]` usando `Ordering::Relaxed`, azzerando qualsiasi costo di sincronizzazione o contesa di memoria.
+
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// Soglia minima di silenzio digitale assoluto dei meter (-120 dBFS).
 const METER_FLOOR_DBFS: f32 = -120.0;
 
-/// Visualization data snapshot exposed to the plugin/clap host.
-/// Contains input, output, and phase correlation values for display/metering purposes.
+/// Snapshot aggregato dei dati di visualizzazione esposto al thread grafico della GUI o all'host CLAP.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterVisualization {
-    /// Input peak level in dBFS
+    /// Livello di picco in ingresso espresso in dBFS (range: -120.0 .. +12.0 dBFS).
     pub input_peak_dbfs: f32,
-    /// Input RMS level in dBFS
+    /// Livello RMS in ingresso espresso in dBFS (range: -120.0 .. +12.0 dBFS).
     pub input_rms_dbfs: f32,
-    /// Output peak level in dBFS
+    /// Livello di picco in uscita espresso in dBFS (range: -120.0 .. +12.0 dBFS).
     pub output_peak_dbfs: f32,
-    /// Output RMS level in dBFS
+    /// Livello RMS in uscita espresso in dBFS (range: -120.0 .. +12.0 dBFS).
     pub output_rms_dbfs: f32,
-    /// Gain reduction applied in dB
+    /// Riduzione di guadagno istantanea applicata dai processori dinamici in dB (valore >= 0.0 dB).
     pub gain_reduction_db: f32,
-    /// Phase correlation between L/R channels (-1.0 to 1.0)
-    /// - 1.0: perfectly correlated (in-phase)
-    /// - -1.0: perfectly anti-correlated (out-of-phase)
-    /// - 0.0: uncorrelated
+    /// Correlatore di fase inter-canale normalizzato [-1.0, +1.0] (+1 = mono/fase, 0 = stereo, -1 = controfase).
     pub phase_correlation: f32,
-    /// Sidechain input peak level in dBFS (if sidechain is active)
-    /// Note: The sidechain processor accumulates internally; this is exposed
-    /// via the Metering::snapshot() method. Direct access to sidechain input
-    /// accumulators is not provided (sidechain module doesn't expose input).
+    /// Livello di picco del segnale sidechain ausiliario in dBFS.
     pub sidechain_input_peak_dbfs: f32,
-    /// Sidechain input RMS level in dBFS
+    /// Livello RMS del segnale sidechain ausiliario in dBFS.
     pub sidechain_input_rms_dbfs: f32,
 }
 
@@ -45,19 +58,24 @@ impl Default for MeterVisualization {
     }
 }
 
+/// Istantanea atomica dei livelli di metering esposta alla GUI o all'host DAW.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterSnapshot {
+    /// Picco di ingresso in dBFS.
     pub input_peak_dbfs: f32,
+    /// RMS di ingresso in dBFS.
     pub input_rms_dbfs: f32,
+    /// Picco di uscita in dBFS.
     pub output_peak_dbfs: f32,
+    /// RMS di uscita in dBFS.
     pub output_rms_dbfs: f32,
+    /// Gain reduction massima in dB.
     pub gain_reduction_db: f32,
-    /// Phase correlation between left and right channels (-1.0 to 1.0).
-    /// Only meaningful for stereo (2-channel) signals.
+    /// Correlazione di fase L/R [-1.0, +1.0].
     pub phase_correlation: f32,
-    /// Sidechain input peak level in dBFS.
+    /// Picco del segnale sidechain in dBFS.
     pub sidechain_input_peak_dbfs: f32,
-    /// Sidechain input RMS level in dBFS.
+    /// RMS del segnale sidechain in dBFS.
     pub sidechain_input_rms_dbfs: f32,
 }
 
@@ -76,6 +94,7 @@ impl Default for MeterSnapshot {
     }
 }
 
+/// Accumulatore real-time di statistiche audio per blocco con pubblicazione atomica thread-safe.
 #[derive(Debug)]
 pub struct Metering {
     input_peak: f32,
@@ -84,11 +103,11 @@ pub struct Metering {
     output_sum_squares: f64,
     gain_reduction_peak: f32,
     sample_count: u64,
-    // Phase correlation accumulators (for stereo)
+    // Accumulatori per la correlazione di fase stereo Pearson (somma L*R, L^2, R^2)
     phase_corr_sum_lr: f64,
     phase_corr_sum_ll: f64,
     phase_corr_sum_rr: f64,
-    // Sidechain input accumulators
+    // Accumulatori per l'ingresso sidechain
     sidechain_input_peak: f32,
     sidechain_input_sum_squares: f64,
     published: [AtomicU32; 8],
@@ -110,14 +129,14 @@ impl Default for Metering {
             sidechain_input_peak: 0.0,
             sidechain_input_sum_squares: 0.0,
             published: [
-                AtomicU32::new(silent),       // input_peak_dbfs
-                AtomicU32::new(silent),       // input_rms_dbfs
-                AtomicU32::new(silent),       // output_peak_dbfs
-                AtomicU32::new(silent),       // output_rms_dbfs
+                AtomicU32::new(silent),            // input_peak_dbfs
+                AtomicU32::new(silent),            // input_rms_dbfs
+                AtomicU32::new(silent),            // output_peak_dbfs
+                AtomicU32::new(silent),            // output_rms_dbfs
                 AtomicU32::new(0.0_f32.to_bits()), // gain_reduction_db
                 AtomicU32::new(0.0_f32.to_bits()), // phase_correlation
-                AtomicU32::new(silent),       // sidechain_input_peak_dbfs
-                AtomicU32::new(silent),       // sidechain_input_rms_dbfs
+                AtomicU32::new(silent),            // sidechain_input_peak_dbfs
+                AtomicU32::new(silent),            // sidechain_input_rms_dbfs
             ],
         }
     }
@@ -191,23 +210,26 @@ impl Metering {
             };
 
         // Calculate phase correlation (Pearson correlation coefficient for stereo)
-        let phase_correlation = if self.sample_count >= 2 && self.phase_corr_sum_ll > 0.0 && self.phase_corr_sum_rr > 0.0 {
-            let corr = self.phase_corr_sum_lr / (self.phase_corr_sum_ll * self.phase_corr_sum_rr).sqrt();
+        let phase_correlation = if self.sample_count >= 2
+            && self.phase_corr_sum_ll > 0.0
+            && self.phase_corr_sum_rr > 0.0
+        {
+            let corr =
+                self.phase_corr_sum_lr / (self.phase_corr_sum_ll * self.phase_corr_sum_rr).sqrt();
             corr.clamp(-1.0, 1.0) as f32
         } else {
             0.0
         };
 
-        let (sidechain_input_peak_dbfs, sidechain_input_rms_dbfs) =
-            if self.sample_count == 0 {
-                (METER_FLOOR_DBFS, METER_FLOOR_DBFS)
-            } else {
-                let count = self.sample_count as f64;
-                (
-                    amplitude_to_dbfs(self.sidechain_input_peak),
-                    amplitude_to_dbfs((self.sidechain_input_sum_squares / count).sqrt() as f32),
-                )
-            };
+        let (sidechain_input_peak_dbfs, sidechain_input_rms_dbfs) = if self.sample_count == 0 {
+            (METER_FLOOR_DBFS, METER_FLOOR_DBFS)
+        } else {
+            let count = self.sample_count as f64;
+            (
+                amplitude_to_dbfs(self.sidechain_input_peak),
+                amplitude_to_dbfs((self.sidechain_input_sum_squares / count).sqrt() as f32),
+            )
+        };
 
         let values = [
             input_peak_dbfs,
