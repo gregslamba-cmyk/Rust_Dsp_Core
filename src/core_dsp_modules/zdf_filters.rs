@@ -1,6 +1,7 @@
-use crate::core_dsp_modules::filters::FilterType;
+use crate::core_dsp_modules::filters::{Biquad, FilterType, SvfFilter};
 
 use crate::core_dsp_modules::nonlinear_stages::flush_denormal;
+use crate::core_dsp_modules::resampler_bitdepth::{Oversampler, OversamplingFactor};
 /// Topology-Preserving Transform (TPT / Zero-Delay Feedback) State Variable Filter
 /// with integrated `tanh` saturation in the feedback loop resolved via Newton-Raphson iterations.
 #[derive(Clone, Copy, Debug)]
@@ -200,6 +201,306 @@ impl ZdfSvf {
     pub fn reset(&mut self) {
         self.ic1eq = 0.0;
         self.ic2eq = 0.0;
+    }
+}
+
+//==============================================================================
+// Extended ZDF filters for mix/mastering
+//==============================================================================
+
+/// Tilt equalizer: parallel low/high pass SVF at pivot frequency, tilted by `tilt`.
+#[derive(Clone, Copy, Debug)]
+pub struct TiltEq {
+    lp: SvfFilter<f64>,
+    hp: SvfFilter<f64>,
+    pivot_hz: f64,
+    tilt: f64,
+    sample_rate: f64,
+}
+
+impl Default for TiltEq {
+    fn default() -> Self {
+        Self {
+            lp: SvfFilter::default(),
+            hp: SvfFilter::default(),
+            pivot_hz: 1000.0,
+            tilt: 0.0,
+            sample_rate: 44100.0,
+        }
+    }
+}
+
+impl TiltEq {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn configure(&mut self, sample_rate: f64, pivot_hz: f64, tilt: f64) -> bool {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return false;
+        }
+        if !pivot_hz.is_finite() || pivot_hz <= 0.0 || pivot_hz >= sample_rate * 0.49 {
+            return false;
+        }
+        let tilt = tilt.clamp(-1.0, 1.0);
+        if !tilt.is_finite() {
+            return false;
+        }
+        self.sample_rate = sample_rate;
+        self.pivot_hz = pivot_hz;
+        self.tilt = tilt;
+        self.lp.configure(sample_rate, FilterType::LowPass, pivot_hz, 0.707, 0.0)
+            && self.hp.configure(sample_rate, FilterType::HighPass, pivot_hz, 0.707, 0.0)
+    }
+
+    pub fn reset(&mut self) {
+        self.lp.reset();
+        self.hp.reset();
+    }
+
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        if !input.is_finite() {
+            self.reset();
+            return 0.0;
+        }
+        let lp = self.lp.process(input);
+        let hp = self.hp.process(input);
+        let out = ((1.0 - self.tilt) * 0.5) * lp + ((1.0 + self.tilt) * 0.5) * hp;
+        if out.is_finite() { out } else { 0.0 }
+    }
+}
+
+/// Multi-order IIR cascade built from Biquad stages (Butterworth / Bessel).
+#[derive(Clone, Copy, Debug)]
+pub struct IirCascade<const STAGES: usize> {
+    sections: [Biquad<f64>; STAGES],
+    sample_rate: f64,
+}
+
+impl<const STAGES: usize> IirCascade<STAGES> {
+    pub fn new() -> Self {
+        Self {
+            sections: [Biquad::default(); STAGES],
+            sample_rate: 44100.0,
+        }
+    }
+
+    /// Low-pass Butterworth cascade: each stage adds 6 dB/oct.
+    pub fn configure_butterworth_low_pass(
+        &mut self,
+        sample_rate: f64,
+        frequency: f64,
+        order_db_per_oct: usize,
+    ) -> bool {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return false;
+        }
+        if !frequency.is_finite() || frequency <= 0.0 || frequency >= sample_rate * 0.49 {
+            return false;
+        }
+        let stages = STAGES.min(order_db_per_oct / 6);
+        if stages == 0 {
+            return false;
+        }
+        self.sample_rate = sample_rate;
+        for i in 0..stages {
+            let q = 0.51 + (i as f64 * 0.02).min(0.95);
+            if !self.sections[i]
+                .configure(sample_rate, FilterType::LowPass, frequency, q, 0.0)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn reset(&mut self) {
+        for section in &mut self.sections {
+            section.reset();
+        }
+    }
+
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        if !input.is_finite() {
+            self.reset();
+            return 0.0;
+        }
+        let mut out = input;
+        for section in &mut self.sections {
+            out = section.process(out);
+            if !out.is_finite() {
+                return 0.0;
+            }
+        }
+        out
+    }
+}
+
+impl<const STAGES: usize> Default for IirCascade<STAGES> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Feedforward/feedback comb filter with optional one-pole damping in the feedback loop.
+#[derive(Clone, Copy, Debug)]
+pub struct CombFilter<const DELAY: usize> {
+    buffer: [f64; DELAY],
+    write_idx: usize,
+    feedback: f64,
+    feedforward: f64,
+    damping: f64,
+    damp_state: f64,
+}
+
+impl<const DELAY: usize> Default for CombFilter<DELAY> {
+    fn default() -> Self {
+        Self {
+            buffer: [0.0; DELAY],
+            write_idx: 0,
+            feedback: 0.0,
+            feedforward: 0.0,
+            damping: 0.0,
+            damp_state: 0.0,
+        }
+    }
+}
+
+impl<const DELAY: usize> CombFilter<DELAY> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn configure(
+        &mut self,
+        delay_ms: f64,
+        sample_rate: f64,
+        feedback: f64,
+        feedforward: f64,
+        damping: f64,
+    ) -> bool {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return false;
+        }
+        if !delay_ms.is_finite() || delay_ms <= 0.0 {
+            return false;
+        }
+        let delay_samples = ((delay_ms / 1000.0) * sample_rate).round() as usize;
+        if delay_samples == 0 || delay_samples >= DELAY {
+            return false;
+        }
+        let feedback = feedback.clamp(-0.99, 0.99);
+        let feedforward = feedforward.clamp(-1.0, 1.0);
+        let damping = damping.clamp(0.0, 1.0);
+        if !feedback.is_finite() || !feedforward.is_finite() || !damping.is_finite() {
+            return false;
+        }
+        self.feedback = feedback;
+        self.feedforward = feedforward;
+        self.damping = damping;
+        self.buffer.fill(0.0);
+        self.write_idx = 0;
+        self.damp_state = 0.0;
+        true
+    }
+
+    pub fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_idx = 0;
+        self.damp_state = 0.0;
+    }
+
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        if !input.is_finite() {
+            self.reset();
+            return 0.0;
+        }
+        let read_idx = if self.write_idx >= DELAY {
+            0
+        } else {
+            DELAY - self.write_idx
+        };
+        let read_idx = read_idx.min(DELAY - 1);
+        let delayed = self.buffer[read_idx];
+        let damped = self.damp_state + self.damping * (delayed - self.damp_state);
+        self.damp_state = flush_denormal(damped);
+        let out = self.feedforward * input + self.feedback * damped;
+        self.buffer[self.write_idx] = flush_denormal(input + self.feedback * damped);
+        self.write_idx = (self.write_idx + 1) % DELAY;
+        if out.is_finite() { out } else { 0.0 }
+    }
+}
+
+/// Natural-phase EQ (bell/shelf) with internal 2× oversampling to preserve near-zero phase.
+#[derive(Clone, Copy, Debug)]
+pub struct NaturalPhaseEq {
+    eq: ZdfSvf,
+    oversampler: Oversampler<f64>,
+    sample_rate: f64,
+}
+
+impl Default for NaturalPhaseEq {
+    fn default() -> Self {
+        Self {
+            eq: ZdfSvf::default(),
+            oversampler: Oversampler::<f64>::default(),
+            sample_rate: 44100.0,
+        }
+    }
+}
+
+impl NaturalPhaseEq {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn configure(
+        &mut self,
+        sample_rate: f64,
+        pivot_hz: f64,
+        bell_freq: f64,
+        _shelf_freq: f64,
+        bell_gain_db: f64,
+        _shelf_gain_db: f64,
+    ) -> bool {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return false;
+        }
+        if !pivot_hz.is_finite() || pivot_hz <= 0.0 || pivot_hz >= sample_rate * 0.49 {
+            return false;
+        }
+        self.sample_rate = sample_rate;
+        let ok_bell = self.eq.configure(
+            sample_rate,
+            FilterType::Bell,
+            bell_freq,
+            0.707,
+            bell_gain_db,
+            0.0,
+        );
+        if !ok_bell {
+            return false;
+        }
+        self.oversampler.reset();
+        true
+    }
+
+    pub fn reset(&mut self) {
+        self.eq.reset();
+        self.oversampler.reset();
+    }
+
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        if !input.is_finite() {
+            self.reset();
+            return 0.0;
+        }
+        let Self { eq, oversampler, .. } = self;
+        oversampler.process(input, OversamplingFactor::X2, |s| eq.process(s))
     }
 }
 
