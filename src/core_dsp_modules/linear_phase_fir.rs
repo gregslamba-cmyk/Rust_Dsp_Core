@@ -22,6 +22,8 @@ pub enum FirFilterType {
 pub enum FirWindow {
     Blackman,
     Kaiser,
+    Hann,
+    BlackmanHarris,
 }
 
 /// Computes the zero-order modified Bessel function of the first kind I_0(x).
@@ -107,9 +109,9 @@ impl LinearPhaseFilter {
 
         // Precompute window function w[i]
         let mut w = vec![0.0; n];
+        let denom: f64 = if n > 1 { (n - 1) as f64 } else { 1.0 };
         match window {
             FirWindow::Blackman => {
-                let denom = (n - 1) as f64;
                 for (i, val) in w.iter_mut().enumerate() {
                     let theta = std::f64::consts::PI * 2.0 * (i as f64) / denom;
                     *val = 0.42 - 0.5 * theta.cos() + 0.08 * (2.0 * theta).cos();
@@ -118,7 +120,6 @@ impl LinearPhaseFilter {
             FirWindow::Kaiser => {
                 let beta = 8.5; // ~80 dB side-lobe attenuation
                 let i0_beta = bessel_i0(beta);
-                let denom = m;
                 for (i, val) in w.iter_mut().enumerate() {
                     let diff = (i as f64 - m) / denom;
                     let arg = 1.0 - diff * diff;
@@ -127,6 +128,25 @@ impl LinearPhaseFilter {
                     } else {
                         1.0 / i0_beta
                     };
+                }
+            }
+            FirWindow::Hann => {
+                // Hann: morbido e simmetrico, buon compromesso tra lobo laterale e pre-ringing.
+                for (i, val) in w.iter_mut().enumerate() {
+                    let theta = std::f64::consts::PI * 2.0 * (i as f64) / denom;
+                    *val = 0.5 - 0.5 * theta.cos();
+                }
+            }
+            FirWindow::BlackmanHarris => {
+                // Blackman-Harris a 4 termini: molto basso pre-ringing e lobi laterali profondi.
+                let a0: f64 = 0.35875;
+                let a1: f64 = 0.48829;
+                let a2: f64 = 0.14128;
+                let a3: f64 = 0.01168;
+                for (i, val) in w.iter_mut().enumerate() {
+                    let theta = std::f64::consts::PI * 2.0 * (i as f64) / denom;
+                    *val =
+                        a0 - a1 * theta.cos() + a2 * (2.0 * theta).cos() - a3 * (3.0 * theta).cos();
                 }
             }
         }

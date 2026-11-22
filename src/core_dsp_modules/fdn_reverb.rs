@@ -3,6 +3,7 @@
 //! Designed for real-time: zero allocations in audio thread, pre-allocated delay lines.
 
 use crate::core_dsp_modules::delay_lines::DelayLine;
+use crate::core_dsp_modules::nonlinear_stages::flush_denormal;
 
 /// FDN Reverb with configurable number of delay lines (typically 8 or 16).
 /// Uses Hadamard matrix for orthogonal feedback and per-channel damping filters.
@@ -75,7 +76,7 @@ impl FdnReverb {
             let fb = self.mix_buffer[i];
             let damped =
                 self.damping_states[i] + self.damping_coeff * (fb - self.damping_states[i]);
-            self.damping_states[i] = damped;
+            self.damping_states[i] = flush_denormal(damped);
 
             // Compute delay time per channel (staggered for density)
             let delay_sec = (0.05 + i as f64 * 0.01) * (1.0 + 0.1 * (i as f64 % 3.0));

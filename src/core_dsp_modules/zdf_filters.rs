@@ -1,5 +1,6 @@
 use crate::core_dsp_modules::filters::FilterType;
 
+use crate::core_dsp_modules::nonlinear_stages::flush_denormal;
 /// Topology-Preserving Transform (TPT / Zero-Delay Feedback) State Variable Filter
 /// with integrated `tanh` saturation in the feedback loop resolved via Newton-Raphson iterations.
 #[derive(Clone, Copy, Debug)]
@@ -181,11 +182,11 @@ impl ZdfSvf {
             }
         }
 
-        let v1 = self.a1 * self.ic1eq + self.a2 * v3;
-        let v2 = self.ic2eq + self.a3 * self.ic1eq + self.a3 * v3;
+        let v1 = flush_denormal(self.a1 * self.ic1eq + self.a2 * v3);
+        let v2 = flush_denormal(self.ic2eq + self.a3 * self.ic1eq + self.a3 * v3);
 
-        self.ic1eq = v1 + v1 - self.ic1eq;
-        self.ic2eq = v2 + v2 - self.ic2eq;
+        self.ic1eq = flush_denormal(v1 + v1 - self.ic1eq);
+        self.ic2eq = flush_denormal(v2 + v2 - self.ic2eq);
 
         let output = self.m0 * input + self.m1 * v1 + self.m2 * v2;
         if output.is_finite() {
