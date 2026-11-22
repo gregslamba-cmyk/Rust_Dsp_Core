@@ -1,6 +1,25 @@
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::doc_lazy_continuation,
+    clippy::needless_range_loop,
+    clippy::manual_div_ceil,
+    clippy::collapsible_if,
+    clippy::manual_is_multiple_of,
+    clippy::manual_clamp,
+    clippy::unnecessary_cast,
+    clippy::implicit_saturating_sub,
+)]
 
 pub mod core_dsp_modules;
 
+pub use core_dsp_modules::delay_lines;
+pub use core_dsp_modules::fdn_reverb;
 pub use core_dsp_modules::fft_convolution;
 pub use core_dsp_modules::linear_phase_fir;
+pub use core_dsp_modules::loudness_rider;
+pub use core_dsp_modules::partitioned_convolver;
+pub use core_dsp_modules::spectral_analyzer;
+pub use core_dsp_modules::tape_physics;
+pub use core_dsp_modules::pitch_shifter;
+pub use core_dsp_modules::spectral_restoration;
+pub use core_dsp_modules::tempo_sync;

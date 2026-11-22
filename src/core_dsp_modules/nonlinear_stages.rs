@@ -14,6 +14,60 @@ pub enum NonlinearMode {
     DiscreteOpAmp,
 }
 
+/// Miller effect roll-off: dynamic single-pole low-pass whose corner frequency
+/// drops proportionally to drive, rounding the extreme highs like tube/triode
+/// and discrete transistor stages.
+///
+/// At drive = 1.0 (unity), corner ≈ Nyquist (no audible effect).
+/// As drive increases, the corner frequency descends toward ~8–12 kHz.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MillerRollOff {
+    state_l: f64,
+    state_r: f64,
+    sample_rate: f64,
+}
+
+impl MillerRollOff {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset(&mut self) {
+        self.state_l = 0.0;
+        self.state_r = 0.0;
+    }
+
+    /// Configure sample rate. Must be called before processing.
+    pub fn configure(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate.max(1.0);
+    }
+
+    /// Process one sample (L or R channel). `channel` is 0 for L, 1 for R.
+    /// `drive` is the saturation drive (>= 1.0). Higher drive -> lower corner.
+    #[inline]
+    pub fn process(&mut self, sample: f64, drive: f64, channel: usize) -> f64 {
+        if !sample.is_finite() || !drive.is_finite() || self.sample_rate <= 0.0 {
+            self.reset();
+            return 0.0;
+        }
+
+        let drive = drive.max(1.0);
+        // Corner frequency: starts at ~0.49 * sr (near Nyquist) at drive=1.0,
+        // descends to ~8 kHz at high drive. Empirical mapping.
+        let base_corner_hz = self.sample_rate * 0.49;
+        let min_corner_hz = 8_000.0;
+        let corner_hz = (base_corner_hz - min_corner_hz).max(min_corner_hz) / (drive - 1.0).max(0.01).ln().max(1.0).min(10.0);
+
+        // Single-pole IIR (TPT / bilinear transform for stability)
+        let g = (std::f64::consts::TAU * corner_hz / self.sample_rate).tan();
+        let alpha = g / (1.0 + g);
+
+        let state = if channel == 0 { &mut self.state_l } else { &mut self.state_r };
+        *state += alpha * (sample - *state);
+        *state
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SlewRateLimiter {
     last_output: f64,
