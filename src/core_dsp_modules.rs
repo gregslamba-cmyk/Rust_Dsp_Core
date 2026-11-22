@@ -26,4 +26,6 @@ pub mod vari_mu;
 pub mod zdf_filters;
 pub mod pitch_shifter;
 pub mod mix_mastering_fx;
+pub mod modulation_engine;
+pub mod mpc_sampler_engine;
 

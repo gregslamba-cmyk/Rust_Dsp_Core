@@ -23,3 +23,6 @@ pub use core_dsp_modules::tape_physics;
 pub use core_dsp_modules::pitch_shifter;
 pub use core_dsp_modules::spectral_restoration;
 pub use core_dsp_modules::tempo_sync;
+pub use core_dsp_modules::mix_mastering_fx;
+pub use core_dsp_modules::modulation_engine;
+pub use core_dsp_modules::mpc_sampler_engine;
