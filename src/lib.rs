@@ -1,3 +1,4 @@
+#![allow(clippy::new_without_default)]
 #![forbid(unsafe_code)]
 #![allow(
     clippy::doc_lazy_continuation,
@@ -12,6 +13,7 @@
 
 pub mod core_dsp_modules;
 
+pub use core_dsp_modules::component_models;
 pub use core_dsp_modules::delay_lines;
 pub use core_dsp_modules::fdn_reverb;
 pub use core_dsp_modules::fft_convolution;

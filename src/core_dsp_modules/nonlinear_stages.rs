@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn reference_vu_constants() {
         assert_eq!(REFERENCE_VU_DBFS, -18.0);
-        let expected = (10.0_f64.powf(REFERENCE_VU_DBFS / 20.0));
+        let expected = 10.0_f64.powf(REFERENCE_VU_DBFS / 20.0);
         assert!((REFERENCE_VU_LINEAR - expected).abs() < 1e-12);
     }
 

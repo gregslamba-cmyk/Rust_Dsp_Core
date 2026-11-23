@@ -4,6 +4,7 @@
 
 /// Delay line with configurable maximum length and interpolation method.
 /// Uses cubic interpolation for smooth fractional delay reads.
+#[derive(Clone, Debug)]
 pub struct DelayLine {
     buffer: Vec<f64>,
     write_pos: usize,

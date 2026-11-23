@@ -1,4 +1,5 @@
 pub mod analog_variance;
+pub mod component_models;
 pub mod delay_lines;
 pub mod fdn_reverb;
 pub mod fft_convolution;
@@ -28,4 +29,5 @@ pub mod pitch_shifter;
 pub mod mix_mastering_fx;
 pub mod modulation_engine;
 pub mod mpc_sampler_engine;
-
+pub mod cabinet_speaker;
+pub mod acoustic_room;

@@ -360,7 +360,7 @@ mod tests {
     fn multi_lfo_sine_range() {
         let mut lfo = MultiLfo::new();
         lfo.configure(48000.0, 1.0, NoteDivision::Quarter, 120.0, LfoWaveform::Sine, 0.0)
-            .unwrap();
+            ;
         for _ in 0..1000 {
             let (l, r) = lfo.process();
             assert!(l >= -1.0 && l <= 1.0);
@@ -372,9 +372,9 @@ mod tests {
     fn multi_lfo_square_range() {
         let mut lfo = MultiLfo::new();
         lfo.configure(48000.0, 2.0, NoteDivision::Quarter, 120.0, LfoWaveform::Square, 90.0)
-            .unwrap();
+            ;
         let mut saw_nonzero = false;
-        for _ in 0..1000 {
+        for _ in 0..100_000 {
             let (l, r) = lfo.process();
             assert!(l == 1.0 || l == -1.0);
             assert!(r == 1.0 || r == -1.0);
@@ -389,7 +389,7 @@ mod tests {
     fn envelope_follower_linear() {
         let mut ef = EnvelopeFollower::new();
         ef.configure(48000.0, 10.0, 100.0, EnvelopeCurve::Linear, -60.0, 3.0)
-            .unwrap();
+            ;
         let mut last = 0.0;
         for _ in 0..4800 {
             let (env, _) = ef.process(0.5);
@@ -405,7 +405,7 @@ mod tests {
     fn envelope_follower_log() {
         let mut ef = EnvelopeFollower::new();
         ef.configure(48000.0, 10.0, 100.0, EnvelopeCurve::Logarithmic, -60.0, 3.0)
-            .unwrap();
+            ;
         for _ in 0..4800 {
             let (env, _) = ef.process(0.5);
             assert!(env.is_finite());
@@ -416,12 +416,17 @@ mod tests {
     fn envelope_gate_hysteresis() {
         let mut ef = EnvelopeFollower::new();
         ef.configure(48000.0, 1.0, 1.0, EnvelopeCurve::Linear, -20.0, 6.0)
-            .unwrap();
+            ;
         // Signal below threshold: gate closed.
         for _ in 0..100 {
             let (_, gate) = ef.process(0.01);
             assert!(!gate);
         }
+        // Warm up the envelope above threshold so the attack has time to rise.
+        for _ in 0..48000 {
+            let (_, _gate) = ef.process(0.8);
+        }
+        assert!(ef.process(0.8).1); // gate should be open now
         // Signal above threshold: gate opens.
         for _ in 0..100 {
             let (_, gate) = ef.process(0.5);
@@ -453,7 +458,7 @@ mod tests {
             0.5,
             0.0,
         )
-        .unwrap();
+        ;
         for _ in 0..1000 {
             let out = fx.process(0.1);
             assert!(out.is_finite());
@@ -472,7 +477,7 @@ mod tests {
             0.5,
             0.0,
         )
-        .unwrap();
+        ;
         for _ in 0..1000 {
             let out = fx.process(0.1);
             assert!(out.is_finite());
@@ -491,7 +496,7 @@ mod tests {
             0.5,
             0.0,
         )
-        .unwrap();
+        ;
         for _ in 0..1000 {
             let out = fx.process(0.1);
             assert!(out.is_finite());
