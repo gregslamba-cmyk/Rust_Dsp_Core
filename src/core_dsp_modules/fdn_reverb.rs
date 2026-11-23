@@ -69,9 +69,14 @@ impl FdnReverb {
     pub fn process_sample(&mut self, input: f64) -> (f64, f64) {
         let clean_in = if input.is_finite() { input } else { 0.0 };
         let n = self.delay_lines.len();
+        // Only the first 16 lines are mixed to avoid stacking unbounded channels.
+        let mix_n = n.min(16);
 
-        // 1. Write input + feedback into each delay line
-        for i in 0..n {
+        // 1. Write input + feedback into each delay line and CAPTURE the delayed
+        //    output tap of that line. Reading with process_sample(0.0, ...) would
+        //    overwrite the buffer with zero and destroy the reverb tail.
+        let mut outputs = [0.0; 16];
+        for i in 0..mix_n {
             // Damping filter (one-pole lowpass) on feedback signal
             let fb = self.mix_buffer[i];
             let damped =
@@ -80,27 +85,17 @@ impl FdnReverb {
 
             // Compute delay time per channel (staggered for density)
             let delay_sec = (0.05 + i as f64 * 0.01) * (1.0 + 0.1 * (i as f64 % 3.0));
-            // Write input + damped feedback
+            // Write input + damped feedback; the returned value is the true delayed tap.
             let write_val = clean_in + self.feedback_gain * damped;
-            let _ = self.delay_lines[i].process_sample(write_val, delay_sec);
+            outputs[i] = self.delay_lines[i].process_sample(write_val, delay_sec);
         }
 
-        // 2. Read outputs from delay lines
-        let mut outputs = [0.0; 16];
-        for i in 0..n.min(16) {
-            outputs[i] = self.delay_lines[i].process_sample(0.0, 0.0); // read at current write pos? Actually need read without advancing write.
-            // Note: our DelayLine::process_sample writes then reads. For read-only we need separate method.
-            // Placeholder: we'll just use the buffer directly.
-        }
-
-        // 3. Apply Hadamard matrix feedback (orthogonal mixing)
-        // Simplified: mix_buffer = Hadamard * outputs
-        // For Hadamard of size n (power of two), we can compute in-place.
-        self.mix_buffer[..n].copy_from_slice(&outputs[..n]);
+        // 2. Apply Hadamard matrix feedback (orthogonal mixing).
+        self.mix_buffer[..mix_n].copy_from_slice(&outputs[..mix_n]);
         // In-place Hadamard transform (butterfly)
         let mut step = 1;
-        while step < n {
-            for i in (0..n).step_by(step * 2) {
+        while step < mix_n {
+            for i in (0..mix_n).step_by(step * 2) {
                 for j in 0..step {
                     let a = self.mix_buffer[i + j];
                     let b = self.mix_buffer[i + j + step];
@@ -111,10 +106,10 @@ impl FdnReverb {
             step *= 2;
         }
 
-        // 4. Stereo output: sum even/odd channels for L/R
+        // 3. Stereo output: sum even/odd channels for L/R
         let mut left = 0.0;
         let mut right = 0.0;
-        for i in 0..n {
+        for i in 0..mix_n {
             if i % 2 == 0 {
                 left += self.mix_buffer[i];
             } else {
@@ -123,7 +118,7 @@ impl FdnReverb {
         }
 
         // Normalize
-        let norm = 1.0 / (n as f64).sqrt();
+        let norm = 1.0 / (mix_n as f64).sqrt();
         left *= norm;
         right *= norm;
 
@@ -159,5 +154,38 @@ impl FdnReverb {
         }
         self.damping_states.fill(0.0);
         self.mix_buffer.fill(0.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fdn_reverb_silence_at_rest() {
+        let mut reverb = FdnReverb::new(8, 0.5, 48_000.0);
+        reverb.reset();
+        for _ in 0..100 {
+            let (l, r) = reverb.process_sample(0.0);
+            assert_eq!(l, 0.0);
+            assert_eq!(r, 0.0);
+        }
+    }
+
+    #[test]
+    fn fdn_reverb_irregular_sizes_stay_finite() {
+        let mut reverb = FdnReverb::new(8, 0.5, 48_000.0);
+        reverb.reset();
+        for size in [1usize, 7, 64, 513, 2048] {
+            let input: Vec<f64> = (0..size)
+                .map(|i| if i == 0 { f64::NAN } else { (i as f64 * 0.01).sin() })
+                .collect();
+            let mut left = vec![f64::NAN; size];
+            let mut right = vec![f64::NAN; size];
+            reverb.process_block(&input, &mut left, &mut right);
+            for s in left.iter().chain(right.iter()) {
+                assert!(s.is_finite(), "non-finite in size {size}");
+            }
+        }
     }
 }

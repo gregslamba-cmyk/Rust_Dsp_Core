@@ -68,15 +68,25 @@ impl LoudnessRider {
                 let in_s = *in_s;
                 let in_s = if in_s.is_finite() { in_s } else { 0.0 };
                 // compute envelope (simple RC filter)
-                let abs_in = in_s.abs();
-                let target = if abs_in > self.threshold_db {
-                    abs_in - self.threshold_db
+                // Convert amplitude to dBFS for threshold comparison
+                let db_in = if in_s == 0.0 { -120.0 } else { 20.0 * in_s.abs().log10().max(-120.0) };
+                let target = if db_in > self.threshold_db {
+                    db_in - self.threshold_db
                 } else {
                     0.0
                 };
                 // exponential attack/release toward target
-                let attack_coeff = (-self.attack_s * self.sample_rate).exp();
-                let release_coeff = (-self.release_s * self.sample_rate).exp();
+                // attack_coeff = exp(-1 / (fs * tau)), where tau is in seconds
+                let attack_coeff = if self.attack_s > 0.0 {
+                    (-1.0 / (self.sample_rate * self.attack_s)).exp()
+                } else {
+                    1.0
+                };
+                let release_coeff = if self.release_s > 0.0 {
+                    (-1.0 / (self.sample_rate * self.release_s)).exp()
+                } else {
+                    1.0
+                };
                 let coeff = if target > self.envelope {
                     attack_coeff
                 } else {

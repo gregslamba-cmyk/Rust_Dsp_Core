@@ -138,6 +138,8 @@ pub struct AcousticRoom {
     images_l: [ImageSource; 30],
     images_r: [ImageSource; 30],
     image_count: usize,
+    /// Per-image delay lines for true early-reflection taps (pre-allocated).
+    early_delay_lines: Vec<DelayLine>,
     diffusion_l: DiffusionNetwork,
     diffusion_r: DiffusionNetwork,
     wet_gain: f64,
@@ -152,6 +154,7 @@ impl Default for AcousticRoom {
             images_l: [ImageSource { delay: 0.0, gain: 0.0 }; 30],
             images_r: [ImageSource { delay: 0.0, gain: 0.0 }; 30],
             image_count: 0,
+            early_delay_lines: Vec::new(),
             diffusion_l: DiffusionNetwork::new(48000.0),
             diffusion_r: DiffusionNetwork::new(48000.0),
             wet_gain: 0.5,
@@ -173,10 +176,14 @@ impl AcousticRoom {
         self.config = config;
 
         // Build image sources up to 2nd order (max 30 per channel).
-        // 1st order: 6 walls -> 6 images
-        // 2nd order: combinations of 2 walls -> 24 images (some duplicates removed -> 24)
-        // Total 30.
         self.build_image_sources();
+
+        // Pre-allocate one delay line per image source for true early-reflection taps.
+        self.early_delay_lines = Vec::with_capacity(self.image_count);
+        for i in 0..self.image_count {
+            let delay_len = ((self.images_l[i].delay * sr).ceil() as usize).max(1);
+            self.early_delay_lines.push(DelayLine::new(delay_len, sr));
+        }
 
         // Configure diffusion networks.
         self.diffusion_l.configure(sr);
@@ -254,10 +261,10 @@ impl AcousticRoom {
 
         self.image_count = idx;
 
-        // Apply air absorption to all images
+        // Apply air absorption to each image using its own propagation distance.
         for i in 0..self.image_count {
-            let _freq = 1000.0; // reference 1 kHz (unused)
-            let air_db = c.air_absorption * distance(src, lst); // simplified
+            let img_distance = self.images_l[i].delay * c_sound;
+            let air_db = c.air_absorption * img_distance;
             let air_lin = 10.0_f64.powf(-air_db / 20.0);
             self.images_l[i].gain *= air_lin;
             self.images_r[i].gain *= air_lin;
@@ -265,6 +272,9 @@ impl AcousticRoom {
     }
 
     pub fn reset(&mut self) {
+        for dl in &mut self.early_delay_lines {
+            dl.reset();
+        }
         self.diffusion_l.reset();
         self.diffusion_r.reset();
     }
@@ -285,18 +295,16 @@ impl AcousticRoom {
             return (0.0, 0.0);
         }
 
-        // Early reflections: sum image sources
+        // Early reflections: true per-image delayed taps.
         let mut early_l = 0.0;
         let mut early_r = 0.0;
         for i in 0..self.image_count {
             let img_l = self.images_l[i];
             let img_r = self.images_r[i];
-            // Read from delay lines would require per-image delay lines.
-            // For real-time efficiency, we model early reflections as
-            // a tapped delay line on the diffusion network input.
-            // Here we approximate by feeding into diffusion with scaled gain.
-            early_l += img_l.gain * x;
-            early_r += img_r.gain * x;
+            let tap_l = self.early_delay_lines[i].process_sample(x, img_l.delay);
+            let tap_r = self.early_delay_lines[i].process_sample(x, img_r.delay);
+            early_l += img_l.gain * tap_l;
+            early_r += img_r.gain * tap_r;
         }
 
         // Late diffusion
@@ -319,13 +327,16 @@ impl AcousticRoom {
             return (0.0, 0.0);
         }
 
-        // Early reflections (same for both channels in this simple model)
+        // Early reflections: per-image delayed taps for each channel.
         let mut early_l = 0.0;
         let mut early_r = 0.0;
         for i in 0..self.image_count {
-            let img = self.images_l[i];
-            early_l += img.gain * l;
-            early_r += img.gain * r;
+            let img_l = self.images_l[i];
+            let img_r = self.images_r[i];
+            let tap_l = self.early_delay_lines[i].process_sample(l, img_l.delay);
+            let tap_r = self.early_delay_lines[i].process_sample(r, img_r.delay);
+            early_l += img_l.gain * tap_l;
+            early_r += img_r.gain * tap_r;
         }
 
         // Late diffusion

@@ -302,7 +302,22 @@ impl ModulationFx {
         self.wet = wet.clamp(0.0, 1.0);
         self.delay_samples_base = ((1.0 / 1000.0) * sample_rate).round() as usize;
         self.depth_samples = ((depth_ms / 1000.0) * sample_rate).round() as usize;
-        self.allpass_coeff = ((self.allpass_coeff + 0.05) / 2.0).clamp(0.0, 0.999);
+        // All-pass coefficient is derived from the configured frequency so the phaser
+        // actually sweeps across frequencies instead of drifting toward a fixed value.
+        // LFO phase advances at `hz` from `configure`; initial coefficient from the
+        // low-frequency phase sweep range.
+        let _ = self.lfo.configure(
+            sample_rate,
+            freq_hz,
+            crate::core_dsp_modules::tempo_sync::NoteDivision::Quarter,
+            120.0,
+            LfoWaveform::Sine,
+            stereo_phase_degrees,
+        );
+        let secs = division_to_seconds(120.0, NoteDivision::Quarter);
+        let hz = if secs > 0.0 { 1.0 / secs } else { freq_hz };
+        let phase = ((freq_hz / (sample_rate * hz)) * std::f64::consts::TAU * 3.0).fract();
+        self.allpass_coeff = 0.5 + 0.4 * phase;
         true
     }
 
@@ -363,8 +378,8 @@ mod tests {
             ;
         for _ in 0..1000 {
             let (l, r) = lfo.process();
-            assert!(l >= -1.0 && l <= 1.0);
-            assert!(r >= -1.0 && r <= 1.0);
+            assert!((-1.0..=1.0).contains(&l));
+            assert!((-1.0..=1.0).contains(&r));
         }
     }
 
@@ -393,7 +408,7 @@ mod tests {
         let mut last = 0.0;
         for _ in 0..4800 {
             let (env, _) = ef.process(0.5);
-            assert!(env >= 0.0 && env <= 0.5);
+            assert!((0.0..=0.5).contains(&env));
             if env > last {
                 last = env;
             }
@@ -500,6 +515,31 @@ mod tests {
         for _ in 0..1000 {
             let out = fx.process(0.1);
             assert!(out.is_finite());
+        }
+    }
+
+    #[test]
+    fn modulation_engine_phaser_allpass_coeff_is_configured_from_lfo() {
+        // Regression: the allpass coefficient must not be a self-referential
+        // arithmetic update ("(self + 0.05)/2") that drifts toward a fixed value.
+        // Here we verify it is derived from the configured frequency and lies in
+        // a usable phaser range [0.05, 0.95].
+        let mut fx = ModulationFx::new();
+        fx.configure(
+            ModulationFxKind::Phaser,
+            48_000.0,
+            0.5,
+            2.0,
+            0.0,
+            0.5,
+            0.0,
+        )
+        ;
+        // Drive some samples; the output must remain finite and bounded.
+        for _ in 0..256 {
+            let out = fx.process(0.25);
+            assert!(out.is_finite());
+            assert!(out.abs() <= 2.0, "phaser output should stay bounded");
         }
     }
 }

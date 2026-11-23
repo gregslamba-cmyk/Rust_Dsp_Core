@@ -8,6 +8,15 @@
 //! - **`Biquad` (Forma Diretta II Trasposta):** Filtro biquad IIR a 2 poli e 2 zeri ottimizzato
 //!   secondo le formule RBJ Audio EQ Cookbook per il pre-filtraggio sidechain a basso consumo di CPU.
 
+#[inline]
+fn flush_denormal<T: Float>(x: T) -> T {
+    if !x.is_finite() || x.abs() < T::from(1.0e-28).unwrap() {
+        T::zero()
+    } else {
+        x
+    }
+}
+
 /// Filtro State Variable a retroazione a ritardo zero (Zero-Delay Feedback / TPT).
 ///
 /// Modella circuiti integratori analogici con risonanza precisa e assenza di discontinuità.
@@ -23,6 +32,8 @@ pub struct SvfFilter<T: Float> {
     m0: T,
     m1: T,
     m2: T,
+    /// Fattore di dissipazione (k = 1/Q) usato nell'equazione di retroazione.
+    k: T,
     /// Tipologia di filtro attiva (LP, HP, Bell, Shelf, Notch, BP).
     filter_type: FilterType,
 }
@@ -38,6 +49,7 @@ impl<T: Float> Default for SvfFilter<T> {
             m0: T::one(),
             m1: T::zero(),
             m2: T::zero(),
+            k: T::one(),
             filter_type: FilterType::LowPass,
         }
     }
@@ -76,6 +88,7 @@ impl<T: Float> SvfFilter<T> {
         self.a1 = a1;
         self.a2 = a2;
         self.a3 = a3;
+        self.k = k;
 
         let a = T::from(10.0)
             .unwrap()
@@ -150,10 +163,16 @@ impl<T: Float> SvfFilter<T> {
         let v3 = input - self.ic2eq;
         let v1 = self.a1 * self.ic1eq + self.a2 * v3;
         let v2 = self.ic2eq + self.a2 * self.ic1eq + self.a3 * v3;
-        self.ic1eq = v1 + v1 - self.ic1eq;
-        self.ic2eq = v2 + v2 - self.ic2eq;
+        self.ic1eq = flush_denormal(v1 + v1 - self.ic1eq);
+        self.ic2eq = flush_denormal(v2 + v2 - self.ic2eq);
 
-        self.m0 * input + self.m1 * v1 + self.m2 * v2
+        let output = self.m0 * input + self.m1 * v1 + self.m2 * v2;
+        if output.is_finite() {
+            output
+        } else {
+            self.reset();
+            T::zero()
+        }
     }
 
     pub fn reset(&mut self) {
@@ -309,8 +328,8 @@ impl<T: Float> Biquad<T> {
             return T::zero();
         }
         let output = self.b0 * input + self.z1;
-        self.z1 = self.b1 * input - self.a1 * output + self.z2;
-        self.z2 = self.b2 * input - self.a2 * output;
+        self.z1 = flush_denormal(self.b1 * input - self.a1 * output + self.z2);
+        self.z2 = flush_denormal(self.b2 * input - self.a2 * output);
         output
     }
 

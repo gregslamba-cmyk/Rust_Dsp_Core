@@ -371,8 +371,10 @@ impl TruePeakLimiter {
         let threshold_linear = 10.0_f64.powf(self.threshold_db / 20.0);
         let ceiling_linear = 10.0_f64.powf(self.ceiling_db / 20.0);
         let mut target_gain = 1.0;
-        if env > threshold_linear {
-            target_gain = (threshold_linear / env).min(1.0);
+        // Limit only when the oversampled envelope exceeds the ceiling;
+        // threshold_db defines the detection onset (soft-knee region).
+        if env > ceiling_linear.max(threshold_linear) {
+            target_gain = (ceiling_linear / env).min(1.0);
         }
         // Two-stage adaptive release: fast attack, release adapts to reduction depth.
         let reduction = 1.0 - target_gain;
@@ -386,7 +388,7 @@ impl TruePeakLimiter {
         };
         let gain = flush_denormal(self.gain_state);
 
-        let out = delayed * gain * ceiling_linear / threshold_linear.max(1e-6);
+        let out = delayed * gain;
         if out.is_finite() { out } else { 0.0 }
     }
 }
@@ -698,5 +700,37 @@ impl StereoSpatializer {
         if !l_out.is_finite() { l_out = 0.0; }
         if !r_out.is_finite() { r_out = 0.0; }
         (l_out, r_out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn true_peak_limiter_silence_at_rest() {
+        let mut limiter = TruePeakLimiter::new();
+        limiter.configure(48_000.0, -12.0, -1.0);
+        for _ in 0..100 {
+            assert_eq!(limiter.process(0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn true_peak_limiter_irregular_sizes_stay_finite() {
+        let mut limiter = TruePeakLimiter::new();
+        limiter.configure(48_000.0, -12.0, -1.0);
+        for size in [1usize, 7, 64, 513, 2048] {
+            let input: Vec<f64> = (0..size)
+                .map(|i| if i == 0 { f64::NAN } else { (i as f64 * 0.01).sin() })
+                .collect();
+            let mut output = vec![f64::NAN; size];
+            for i in 0..size {
+                output[i] = limiter.process(input[i]);
+            }
+            for s in output.iter() {
+                assert!(s.is_finite(), "non-finite in size {size}");
+            }
+        }
     }
 }

@@ -81,6 +81,39 @@ impl DelayLine {
         if out.is_finite() { out } else { 0.0 }
     }
 
+    /// Reads a fractional-delayed value from the delay line WITHOUT writing to it.
+    /// Useful for read-only taps in feedback networks where `process_sample` would
+    /// overwrite buffer contents with zero/garbage.
+    #[inline]
+    pub fn read_sample(&self, delay_sec: f64) -> f64 {
+        // Compute fractional read position relative to current write position.
+        let delay_samples = (delay_sec * self.sample_rate).clamp(0.0, self.max_len as f64 - 1.0);
+        let mut read_pos_f = self.write_pos as f64 - delay_samples;
+        if read_pos_f < 0.0 {
+            read_pos_f += self.max_len as f64;
+        }
+
+        let idx0 = read_pos_f.floor() as usize & (self.max_len - 1);
+        let idx1 = (idx0 + 1) & (self.max_len - 1);
+        let idx2 = (idx0 + 2) & (self.max_len - 1);
+        let idx3 = (idx0 + 3) & (self.max_len - 1);
+
+        let y0 = self.buffer.get(idx0).copied().unwrap_or(0.0);
+        let y1 = self.buffer.get(idx1).copied().unwrap_or(0.0);
+        let y2 = self.buffer.get(idx2).copied().unwrap_or(0.0);
+        let y3 = self.buffer.get(idx3).copied().unwrap_or(0.0);
+
+        let frac = read_pos_f - read_pos_f.floor();
+
+        let a = y3 - y2 - y0 + y1;
+        let b = y0 - y1 - a;
+        let c = y2 - y0;
+        let d = y1;
+
+        let out = ((a * frac + b) * frac + c) * frac + d;
+        if out.is_finite() { out } else { 0.0 }
+    }
+
     /// Processes a block of samples in-place. `delay_sec` can be a single value or
     /// a slice of same length (future extension). For now, constant delay per block.
     pub fn process_block(&mut self, input: &[f64], output: &mut [f64], delay_sec: f64) {

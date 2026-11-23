@@ -286,13 +286,14 @@ impl CabinetSpeaker {
     pub fn process_stereo(&mut self, left: f64, right: f64, drive_db: f64) -> (f64, f64) {
         let l = self.driver_l.process_sample(left, drive_db);
         let r = self.driver_r.process_sample(right, drive_db);
+        // Mix stereo channels: m * L + (1-m) * R. When mic_mix == 0 there is no mix.
         let l_out = if self.mic_mix > 0.0 {
-            l * (1.0 - self.mic_mix * 0.25) + l * self.mic_mix * 0.25
+            l * (1.0 - self.mic_mix) + r * self.mic_mix
         } else {
             l
         };
         let r_out = if self.mic_mix > 0.0 {
-            r * (1.0 - self.mic_mix * 0.25) + r * self.mic_mix * 0.25
+            r * (1.0 - self.mic_mix) + l * self.mic_mix
         } else {
             r
         };
@@ -435,8 +436,8 @@ mod tests {
     fn klippel_bl_kms_finite_and_clamped() {
         for x in [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0] {
             let (bl, kms) = klippel_bl_kms(x);
-            assert!(bl.is_finite() && bl >= 0.2 && bl <= 1.0, "Bl out of range for x={x}");
-            assert!(kms.is_finite() && kms >= 1.0 && kms <= 4.0, "Kms out of range for x={x}");
+            assert!(bl.is_finite() && (0.2..=1.0).contains(&bl), "Bl out of range for x={x}");
+            assert!(kms.is_finite() && (1.0..=4.0).contains(&kms), "Kms out of range for x={x}");
         }
         let (bl, kms) = klippel_bl_kms(f64::NAN);
         assert!(bl.is_finite() && kms.is_finite());

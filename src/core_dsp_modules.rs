@@ -1,3 +1,4 @@
+pub mod spatial_3d;
 pub mod analog_variance;
 pub mod component_models;
 pub mod delay_lines;
@@ -6,6 +7,7 @@ pub mod fft_convolution;
 pub mod filters;
 pub mod linear_phase_fir;
 pub mod loudness_rider;
+pub mod loudness_metering;
 pub mod metering;
 pub mod nonlinear_stages;
 pub mod opto_compressor;
