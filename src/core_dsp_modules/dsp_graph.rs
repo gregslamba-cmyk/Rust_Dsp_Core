@@ -480,9 +480,7 @@ mod tests {
         let mut out: Vec<f64> = vec![0.0; num_samples];
         let mut outs: [&mut [f64]; 1] = [&mut out[..]];
         // Provide dry signal on channel 0; wet signal is empty (default to silence)
-        let mut in_slices: Vec<&[f64]> = Vec::new();
-        in_slices.push(dry.as_slice());
-        in_slices.push(wet.as_slice());
+        let in_slices: Vec<&[f64]> = vec![dry.as_slice(), wet.as_slice()];
         node.process_node(&in_slices, &mut outs, 1, num_samples);
         for v in &out { assert!(!v.is_nan()); assert!(!v.is_infinite()); }
     }
