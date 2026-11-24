@@ -19,6 +19,20 @@ use super::filters::{Biquad, FilterType};
 
 use nih_plug::prelude::Enum;
 
+/// Modalità di linking del detector multicanale per processori di dinamica.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MultiChannelLinkMode {
+    /// Multi-Mono / Dual Mono: ogni canale ha detector e gain reduction indipendenti.
+    #[default]
+    Unlinked,
+    /// Stereo Link / Bus Link: gain reduction comune su tutti i canali attivi.
+    AllLinked,
+    /// Surround Stem Link (5.1/7.1): calcola GR comune su Front + Surround escludendo LFE (.1).
+    SurroundStemLink,
+    /// Mid/Side: detector separati per componenti Mid e Side.
+    MidSide,
+}
+
 /// Topologie di filtro disponibili per la modellazione della risposta in frequenza del detector.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Enum)]
 pub enum SidechainFilter {
