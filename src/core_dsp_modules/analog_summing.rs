@@ -63,6 +63,18 @@ impl AdjacentCrosstalkMatrix {
     }
 
     pub fn process(&mut self, channels: &mut [&mut [f64]], num_samples: usize) {
+        // Silence fast-path: if all inputs are silent and previous state has decayed, skip.
+        let has_signal = channels.iter().take(self.previous.len()).any(|c| {
+            c.iter().take(num_samples).any(|&x| x.abs() > 1.0e-20)
+        });
+        if !has_signal && self.previous.iter().all(|&p| p.abs() < 1.0e-20) {
+            for ch in channels.iter_mut().take(self.previous.len()) {
+                for sample in ch.iter_mut().take(num_samples) {
+                    *sample = 0.0;
+                }
+            }
+            return;
+        }
         let nch = channels.len().min(self.previous.len()).max(1);
         let len = (0..nch)
             .map(|i| channels.get(i).map(|c| c.len()).unwrap_or(0))
@@ -138,6 +150,17 @@ impl VirtualEarthSummer {
         out_right: &mut [f64],
         num_samples: usize,
     ) {
+        // Silence fast-path: if no input signal and PSU/saturation at rest, output zeros.
+        let has_signal = stereo_pairs.iter().take(self.max_channels / 2).any(|(l, r)| {
+            l.iter().take(num_samples).any(|&x| x.abs() > 1.0e-20)
+                || r.iter().take(num_samples).any(|&x| x.abs() > 1.0e-20)
+        });
+        if !has_signal && (self.supply_voltage - 1.0).abs() < 1.0e-6 && self.saturation_state < 1.0e-6 {
+            let len = num_samples.min(out_left.len()).min(out_right.len());
+            out_left[..len].fill(0.0);
+            out_right[..len].fill(0.0);
+            return;
+        }
         let pairs = stereo_pairs.len().min(self.max_channels / 2).max(1);
         let len = num_samples.min(out_left.len()).min(out_right.len());
         let drive_lin = 10.0f64.powf(self.bus_drive / 20.0);

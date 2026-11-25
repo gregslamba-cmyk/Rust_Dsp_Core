@@ -34,6 +34,14 @@ impl PartitionedConvolver {
     /// Processes a block of samples using the current partition.
     /// Returns the filtered output.
     pub fn process_block(&mut self, input: &[f64], output: &mut [f64]) {
+        // Silence fast-path: if input is silent, output zeros.
+        let has_signal = input.iter().any(|&x| x.abs() > 1.0e-20);
+        if !has_signal {
+            for out in output.iter_mut() {
+                *out = 0.0;
+            }
+            return;
+        }
         let n = input.len().min(output.len());
         for i in 0..n {
             if let (Some(in_s), Some(out_s)) = (input.get(i), output.get_mut(i)) {

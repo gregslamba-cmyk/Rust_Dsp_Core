@@ -73,6 +73,10 @@ impl FdnReverb {
     /// Returns (left, right) output pair.
     #[inline]
     pub fn process_sample(&mut self, input: f64) -> (f64, f64) {
+        // Silence fast-path: if input is zero and internal state has decayed, skip computation
+        if input == 0.0 && self.mix_buffer.iter().all(|&b| b.abs() < 1.0e-20) && self.damping_states.iter().all(|&s| s.abs() < 1.0e-20) {
+            return (0.0, 0.0);
+        }
         let clean_in = if input.is_finite() { input } else { 0.0 };
         // Apply velvet-noise input diffusion (all-pass cascade).
         let diffuse = self.velvet_diffuser.process_stage(0, clean_in) * 0.7

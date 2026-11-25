@@ -102,6 +102,7 @@ pub struct TubeStage {
     c_alpha: f64,
     m_state: f64,
     m_alpha: f64,
+    bias_tanh: f64,
     sample_rate: f64,
 }
 
@@ -116,6 +117,7 @@ impl TubeStage {
             c_alpha: tpt_alpha(params.crossover_hz, sr),
             m_state: 0.0,
             m_alpha: tpt_alpha(params.miller_base_hz, sr),
+            bias_tanh: params.bias.tanh(),
             sample_rate: sr,
         }
     }
@@ -124,6 +126,7 @@ impl TubeStage {
         self.sample_rate = sample_rate.max(1.0);
         self.c_alpha = tpt_alpha(self.params.crossover_hz, self.sample_rate);
         self.m_alpha = tpt_alpha(self.params.miller_base_hz, self.sample_rate);
+        self.bias_tanh = self.params.bias.tanh();
         self.reset();
     }
 
@@ -141,7 +144,7 @@ impl TubeStage {
         let driven = input * drive;
 
         let p = self.params;
-        let bias_tanh = p.bias.tanh();
+        let bias_tanh = self.bias_tanh;
         let norm = (drive * (1.0 - bias_tanh * bias_tanh)).max(1.0e-4);
 
         let nonlinear_part = p.k * driven.abs().powf(p.p - 1.0) * driven;
@@ -223,6 +226,7 @@ pub struct SolidStateStage {
     c_alpha: f64,
     m_state: f64,
     m_alpha: f64,
+    bias_tanh: f64,
     last_out: f64,
     sample_rate: f64,
 }
@@ -240,6 +244,7 @@ impl SolidStateStage {
             c_alpha,
             m_state: 0.0,
             m_alpha,
+            bias_tanh: params.bias.tanh(),
             last_out: 0.0,
             sample_rate: s,
         }
@@ -249,6 +254,7 @@ impl SolidStateStage {
         self.sample_rate = sample_rate.max(1.0);
         self.c_alpha = tpt_alpha(self.params.crossover_hz, self.sample_rate);
         self.m_alpha = tpt_alpha(12000.0, self.sample_rate);
+        self.bias_tanh = self.params.bias.tanh();
         self.reset();
     }
 
@@ -267,7 +273,7 @@ impl SolidStateStage {
         let driven = input * drive;
 
         let p = self.params;
-        let sat = apply_solid_nonlinearity(driven, drive, p.mode, p.k, p.bias);
+        let sat = apply_solid_nonlinearity(driven, drive, p.mode, p.k, self.bias_tanh);
 
         // Crossover: low band saturated, high band linear
         self.c_state += self.c_alpha * (sat - self.c_state);
@@ -289,15 +295,15 @@ impl SolidStateStage {
 
 // Solid-state nonlinearity dispatch
 #[inline]
-fn apply_solid_nonlinearity(driven: f64, drive: f64, mode: NonlinearMode, k: f64, bias: f64) -> f64 {
+fn apply_solid_nonlinearity(driven: f64, drive: f64, mode: NonlinearMode, k: f64, bias_tanh: f64) -> f64 {
     match mode {
         NonlinearMode::SoftClip => {
-            let v = (driven + bias).tanh() - bias.tanh();
+            let v = (driven + bias_tanh).tanh() - bias_tanh;
             v / drive.max(1.0e-4)
         }
         NonlinearMode::Asymmetric => {
             let sq = k * driven * driven;
-            let v = (driven + bias + sq).tanh() - bias.tanh();
+            let v = (driven + bias_tanh + sq).tanh() - bias_tanh;
             v / drive.max(1.0e-4)
         }
         NonlinearMode::SolidStateClassA => {
