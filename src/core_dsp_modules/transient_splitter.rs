@@ -118,7 +118,7 @@ mod tests {
     fn finite_output() {
         let mut ts = TransientSplitter::new();
         ts.initialize(48_000.0, 50.0);
-        for i in 0..512 {
+        for _ in 0..512 {
             let (t, s) = ts.process(f64::NAN);
             assert!(t.is_finite() && s.is_finite());
         }

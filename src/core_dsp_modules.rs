@@ -39,3 +39,7 @@ pub mod analog_summing;
 pub mod neural_capture;
 pub mod synth_engine;
 pub mod music_theory;
+pub mod transient_splitter;
+pub mod console_mixer;
+pub mod transport_timeline;
+pub mod disk_streamer;

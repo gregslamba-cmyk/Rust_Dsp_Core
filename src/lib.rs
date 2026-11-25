@@ -30,3 +30,7 @@ pub use core_dsp_modules::modulation_engine;
 pub use core_dsp_modules::mpc_sampler_engine;
 pub use core_dsp_modules::analog_summing;
 pub use core_dsp_modules::synth_engine;
+pub use core_dsp_modules::transient_splitter;
+pub use core_dsp_modules::console_mixer;
+pub use core_dsp_modules::transport_timeline;
+pub use core_dsp_modules::disk_streamer;
