@@ -274,6 +274,129 @@ fn amplitude_to_dbfs(amplitude: f32) -> f32 {
     }
 }
 
+/// Telemetria oscilloscopio sincronizzata ai transienti con trigger a zero-crossing.
+/// Ring-buffer a dimensione fissa, zero allocazioni nel thread audio.
+pub struct ScopeTelemetry {
+    buffer: [f64; SCOPE_BUFFER_SIZE],
+    write_pos: usize,
+    trigger_pos: Option<usize>,
+    triggered: bool,
+}
+
+const SCOPE_BUFFER_SIZE: usize = 512;
+const SCOPE_VIEW_SIZE: usize = 256;
+
+impl Default for ScopeTelemetry {
+    fn default() -> Self { Self::new() }
+}
+
+impl ScopeTelemetry {
+    /// Crea un nuovo telemetro oscilloscopio.
+    pub fn new() -> Self {
+        Self {
+            buffer: [0.0; SCOPE_BUFFER_SIZE],
+            write_pos: 0,
+            trigger_pos: None,
+            triggered: false,
+        }
+    }
+
+    /// Spinge un campione nel ring-buffer e armamento del trigger su zero-crossing.
+    #[inline]
+    pub fn push(&mut self, sample: f64) {
+        let s = if sample.is_finite() { sample } else { 0.0 };
+        let prev = self.buffer[(self.write_pos + SCOPE_BUFFER_SIZE - 1) % SCOPE_BUFFER_SIZE];
+        self.buffer[self.write_pos] = s;
+        self.write_pos = (self.write_pos + 1) % SCOPE_BUFFER_SIZE;
+        if !self.triggered && prev <= 0.0 && s > 0.0 {
+            self.trigger_pos = Some(self.write_pos);
+            self.triggered = true;
+        }
+    }
+
+    /// Ritorna una finestra visualizzabile di `SCOPE_VIEW_SIZE` campioni.
+    pub fn view(&self) -> &[f64] {
+        let n = SCOPE_VIEW_SIZE.min(SCOPE_BUFFER_SIZE);
+        if self.write_pos >= n {
+            &self.buffer[self.write_pos - n..self.write_pos]
+        } else {
+            &self.buffer[0..n]
+        }
+    }
+
+    /// Ritorna `true` se è stato rilevato un trigger di zero-crossing.
+    pub fn triggered(&self) -> bool { self.triggered }
+
+    /// Reset dello stato del telemetro.
+    pub fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_pos = 0;
+        self.trigger_pos = None;
+        self.triggered = false;
+    }
+}
+
+/// Correlometro di fase a 3 bande (bassa / media / alta) per segnali stereo L/R.
+pub struct PhaseCorrelator3Band {
+    bands: [BandCorrelator; 3],
+}
+
+struct BandCorrelator {
+    sum_lr: f64,
+    sum_ll: f64,
+    sum_rr: f64,
+    alpha: f64,
+}
+
+impl Default for PhaseCorrelator3Band {
+    fn default() -> Self { Self::new() }
+}
+
+impl PhaseCorrelator3Band {
+    /// Crea un nuovo correlometro a 3 bande.
+    pub fn new() -> Self {
+        Self {
+            bands: core::array::from_fn(|_| BandCorrelator {
+                sum_lr: 0.0,
+                sum_ll: 0.0,
+                sum_rr: 0.0,
+                alpha: 0.1,
+            }),
+        }
+    }
+
+    /// Registra una coppia stereo campioni.
+    pub fn push(&mut self, left: f32, right: f32) {
+        let l = if left.is_finite() { f64::from(left) } else { 0.0 };
+        let r = if right.is_finite() { f64::from(right) } else { 0.0 };
+        for band in &mut self.bands {
+            band.sum_lr = band.alpha * (l * r) + (1.0 - band.alpha) * band.sum_lr;
+            band.sum_ll = band.alpha * (l * l) + (1.0 - band.alpha) * band.sum_ll;
+            band.sum_rr = band.alpha * (r * r) + (1.0 - band.alpha) * band.sum_rr;
+        }
+    }
+
+    /// Ritorna la correlazione per banda [bassa, media, alta] nel range [-1.0, +1.0].
+    pub fn snapshot(&self) -> [f64; 3] {
+        let mut out = [0.0_f64; 3];
+        for (i, band) in self.bands.iter().enumerate() {
+            let denom = (band.sum_ll * band.sum_rr).sqrt();
+            out[i] = if denom > 1e-12 { band.sum_lr / denom } else { 0.0 };
+            out[i] = out[i].clamp(-1.0, 1.0);
+        }
+        out
+    }
+
+    /// Reset dello stato.
+    pub fn reset(&mut self) {
+        for band in &mut self.bands {
+            band.sum_lr = 0.0;
+            band.sum_ll = 0.0;
+            band.sum_rr = 0.0;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{METER_FLOOR_DBFS, MeterSnapshot, Metering};

@@ -10,6 +10,7 @@ pub mod linear_phase_fir;
 pub mod loudness_rider;
 pub mod loudness_metering;
 pub mod metering;
+pub mod sub_harmonic_synth;
 pub mod nonlinear_stages;
 pub mod opto_compressor;
 pub mod panic_protection;
