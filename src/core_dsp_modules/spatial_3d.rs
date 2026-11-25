@@ -96,7 +96,7 @@ pub struct VbapState {
 
 impl VbapState {
     #[inline] pub fn configure(&mut self, positions: &[SpeakerPosition]) -> bool {
-        let n = positions.len(); if n == 0 || n > 64 { return false; }
+        let n = positions.len(); if n == 0 || n > 128 { return false; }
         self.n_speakers = n; self.speaker_positions = positions.to_vec();
         self.weights.resize(n, 0.0); self.accumulated.resize(n, 0.0); true
     }
@@ -190,6 +190,121 @@ impl Spatial3d {
     #[inline] pub fn config(&self) -> &Spatial3dConfig { &self.config }
     #[inline] pub fn sample_count(&self) -> u64 { self.sample_count }
 }
+#[derive(Debug, Clone, Default)]
+pub struct AudioObjectPanner {
+    sample_rate: f64,
+    smoothing: f64,
+    target_azimuth: f64,
+    target_elevation: f64,
+    target_distance: f64,
+    target_spread: f64,
+    current_azimuth: f64,
+    current_elevation: f64,
+    current_distance: f64,
+    current_spread: f64,
+    speaker_count: usize,
+    speaker_positions: Vec<SpeakerPosition>,
+    gains: Vec<f64>,
+    binaural_l: f64,
+    binaural_r: f64,
+    initialized: bool,
+}
+
+impl AudioObjectPanner {
+    pub fn new() -> Self { Self::default() }
+
+    /// Pre-alloca il buffer dei guadagni per i posizionamenti oggetto.
+    /// Deve essere chiamato prima del processing.
+    pub fn configure(&mut self, sample_rate: f64, speaker_positions: &[SpeakerPosition], smoothing: f64) -> bool {
+        if speaker_positions.is_empty() || speaker_positions.len() > 128 { return false; }
+        if !(1.0..=192000.0).contains(&sample_rate) { return false; }
+        self.sample_rate = sample_rate;
+        self.smoothing = smoothing.clamp(0.0, 0.99);
+        self.speaker_positions = speaker_positions.to_vec();
+        self.speaker_count = speaker_positions.len();
+        self.gains = vec![0.0; speaker_positions.len()];
+        self.binaural_l = 0.0;
+        self.binaural_r = 0.0;
+        self.current_azimuth = self.target_azimuth;
+        self.current_elevation = self.target_elevation;
+        self.current_distance = self.target_distance;
+        self.current_spread = self.target_spread;
+        self.initialized = true;
+        true
+    }
+
+    /// Imposta la posizione 3D target di un oggetto (smussata).
+    pub fn set_position(&mut self, azimuth: f64, elevation: f64, distance: f64, spread: f64) {
+        let az = azimuth.clamp(-PI, PI);
+        let el = elevation.clamp(-PI / 2.0, PI / 2.0);
+        let d = distance.clamp(0.0, 100.0);
+        let sp = spread.clamp(0.0, 1.0);
+        self.target_azimuth = az;
+        self.target_elevation = el;
+        self.target_distance = d;
+        self.target_spread = sp;
+    }
+
+    /// Calcola e riempie i guadagni multicanale (buffer pre-allocato) per l'input.
+    /// Applica smoothing 3D, attenuazione di distanza, spread e downmix HRIR binaurale.
+    /// Ritorna lo slice dei guadagni (n = numero di speaker). Zero allocazioni.
+    #[inline]
+    pub fn process(&mut self, input: f64) -> &mut [f64] {
+        let inp = if input.is_finite() { input } else { 0.0 };
+        // Smoothing verso la posizione target
+        let s = self.smoothing;
+        self.current_azimuth += s * (self.target_azimuth - self.current_azimuth);
+        self.current_elevation += s * (self.target_elevation - self.current_elevation);
+        self.current_distance += s * (self.target_distance - self.current_distance);
+        self.current_spread += s * (self.target_spread - self.current_spread);
+        let az = self.current_azimuth;
+        let el = self.current_elevation;
+        let dist = self.current_distance.max(0.001);
+        let spread = self.current_spread.clamp(0.0, 1.0);
+
+        // Attenuazione di distanza (inverse-distance smussata)
+        let atten = 1.0 / (1.0 + dist);
+
+        // Downmix HRIR binaurale
+        let hrtf = hrtf_for_direction(az, el);
+        self.binaural_l = inp * hrtf.left_gain * atten;
+        self.binaural_r = inp * hrtf.right_gain * atten;
+
+        let n = self.speaker_count;
+        let spread_factor = 1.0 - spread; // 1.0 = fuoco stretto, 0.0 = diffuso
+        let uniform = 1.0 / (n as f64);
+        let positions = &self.speaker_positions;
+        let gains = &mut self.gains;
+        for i in 0..n {
+            let sp = positions[i];
+            let az_diff = (az - sp.azimuth).abs();
+            let base = if az_diff < PI / 2.0 { az_diff.cos().max(0.0) } else { 0.0 };
+            let g = (base * spread_factor + uniform * (1.0 - spread_factor)) * atten;
+            gains[i] = if g.is_finite() { g * inp } else { 0.0 };
+        }
+        // Normalizza la somma dei guadagni a <= 1.0
+        let sum: f64 = gains.iter().map(|g| g.abs()).sum();
+        if sum > 1.0 {
+            let inv = 1.0 / sum;
+            for g in gains.iter_mut() {
+                *g *= inv;
+            }
+        }
+        &mut gains[..]
+    }
+
+    /// Restituisce la coppia binaurale Left/Right corrente (downmix HRIR).
+    #[inline]
+    pub fn binaural(&self) -> (f64, f64) {
+        (self.binaural_l, self.binaural_r)
+    }
+
+    /// Numero di speaker configurati.
+    #[inline]
+    pub fn speaker_count(&self) -> usize {
+        self.speaker_count
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +318,73 @@ mod tests {
     #[test] fn test_spatial3d_process_stereo() { let mut spatial = Spatial3d::default(); let positions = vec![SpeakerPosition::from_degrees(45.0, 0.0)]; spatial.initialize(44100.0, Spatial3dConfig::new(44100.0, false), &positions); let (l, r) = spatial.process_stereo(0.5, 0.2, 45.0, 0.0); assert!(l.is_finite()); assert!(r.is_finite()); }
     #[test] fn test_spatial3d_process_ambisonic() { let mut spatial = Spatial3d::default(); let positions = vec![SpeakerPosition::from_degrees(0.0, 0.0)]; spatial.initialize(44100.0, Spatial3dConfig::new(44100.0, true), &positions); let ambi = AmbisonicCoefficients::from_direction(0.0, 0.0, AmbisonicNorm::Amplitude); let (l, r) = spatial.process_ambisonic(&ambi, 0.0, 0.0); assert!(l.is_finite()); assert!(r.is_finite()); }
     #[test] fn test_sanitization() { let mut spatial = Spatial3d::default(); let positions = vec![SpeakerPosition::from_degrees(0.0, 0.0)]; spatial.initialize(44100.0, Spatial3dConfig::new(44100.0, true), &positions); let (l, r) = spatial.process_sample(f64::NAN, 0.0, 0.0); assert_eq!(l, 0.0); assert_eq!(r, 0.0); let (l, r) = spatial.process_sample(f64::INFINITY, 0.0, 0.0); assert_eq!(l, 0.0); assert_eq!(r, 0.0); }
-    #[test] fn test_zero_input() { let mut spatial = Spatial3d::default(); let positions = vec![SpeakerPosition::from_degrees(0.0, 0.0)]; spatial.initialize(44100.0, Spatial3dConfig::new(44100.0, true), &positions); let (l, r) = spatial.process_sample(0.0, 0.0, 0.0); assert_eq!(l, 0.0); assert_eq!(r, 0.0); }
+    #[test]
+    fn test_audio_object_panner_configure_and_process() {
+        let mut panner = AudioObjectPanner::new();
+        let positions = vec![
+            SpeakerPosition::from_degrees(-30.0, 0.0),
+            SpeakerPosition::from_degrees(0.0, 0.0),
+            SpeakerPosition::from_degrees(30.0, 0.0),
+        ];
+        assert!(panner.configure(48000.0, &positions, 0.5));
+        panner.set_position(0.0, 0.0, 1.0, 0.2);
+        let gains = panner.process(0.5);
+        assert_eq!(gains.len(), 3);
+        assert!(gains.iter().all(|g| g.is_finite()));
+        let (l, r) = panner.binaural();
+        assert!(l.is_finite());
+        assert!(r.is_finite());
+    }
+
+    #[test]
+    fn test_audio_object_panner_zero_input_silence() {
+        let mut panner = AudioObjectPanner::new();
+        let positions = vec![SpeakerPosition::from_degrees(0.0, 0.0)];
+        assert!(panner.configure(44100.0, &positions, 0.0));
+        panner.set_position(0.0, 0.0, 1.0, 0.0);
+        let gains = panner.process(0.0);
+        assert!(gains.iter().all(|&g| g == 0.0));
+        let (l, r) = panner.binaural();
+        assert_eq!(l, 0.0);
+        assert_eq!(r, 0.0);
+    }
+
+    #[test]
+    fn test_audio_object_panner_configure_rejects_too_many() {
+        let mut panner = AudioObjectPanner::new();
+        let positions = vec![SpeakerPosition::from_degrees(0.0, 0.0); 129];
+        assert!(!panner.configure(44100.0, &positions, 0.5));
+    }
+
+    #[test]
+    fn test_layout_7_1_4_12ch() {
+        // Layout 7.1.4 = 12 canali (L, R, C, LFE, Ls, Rs, Lb, Rb, Tfl, Tfr, Trl, Trr)
+        let mut panner = AudioObjectPanner::new();
+        let positions: Vec<SpeakerPosition> = (0..12)
+            .map(|i| SpeakerPosition::from_degrees(-180.0 + i as f64 * 30.0, 0.0))
+            .collect();
+        assert_eq!(positions.len(), 12);
+        assert!(panner.configure(96000.0, &positions, 0.3));
+        panner.set_position(45.0_f64.to_radians(), 0.0, 1.0, 0.0);
+        let gains = panner.process(0.7);
+        assert_eq!(gains.len(), 12);
+        assert!(gains.iter().all(|g| g.is_finite()));
+    }
+
+    #[test]
+    fn test_layout_9_1_6_16ch() {
+        // Layout 9.1.6 = 16 canali
+        let mut panner = AudioObjectPanner::new();
+        let positions: Vec<SpeakerPosition> = (0..16)
+            .map(|i| SpeakerPosition::from_degrees(-180.0 + i as f64 * 22.5, 0.0))
+            .collect();
+        assert_eq!(positions.len(), 16);
+        assert!(panner.configure(96000.0, &positions, 0.2));
+        panner.set_position(-90.0_f64.to_radians(), 0.0, 2.0, 0.1);
+        let gains = panner.process(0.4);
+        assert_eq!(gains.len(), 16);
+        assert!(gains.iter().all(|g| g.is_finite()));
+        let (l, r) = panner.binaural();
+        assert!(l.is_finite() && r.is_finite());
+    }
 }

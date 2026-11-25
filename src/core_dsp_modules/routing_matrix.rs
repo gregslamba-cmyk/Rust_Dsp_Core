@@ -1,7 +1,7 @@
 //! # Multi-Channel Routing Matrix & Mid/Side Processing
 //!
 //! Questo modulo gestisce la topologia di instradamento del segnale per l'intera suite,
-//! supportando formati Mono, Stereo L/R, Dual Mono, Mid/Side (M/S) e Multicanale fino a 8 canali.
+//! supportando formati Mono, Stereo L/R, Dual Mono, Mid/Side (M/S) e Multicanale fino a 128 canali.
 //!
 //! ## Matrice Mid/Side Ortonormale
 //! Per la codifica e decodifica M/S viene applicata la matrice ortonormale con fattore di scala
@@ -45,7 +45,7 @@ pub struct StereoFrame<T> {
 /// Matrice di instradamento e mappatura canali per il blocco audio.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RoutingMatrix {
-    /// Numero di canali audio configurati (da 1 a 8).
+    /// Numero di canali audio configurati (da 1 a 128).
     channel_count: usize,
     /// Modalità di routing attiva.
     mode: RoutingMode,
@@ -58,7 +58,7 @@ impl RoutingMatrix {
     /// - `channel_count`: Numero di canali (supportati da 1 a 8).
     /// - `mode`: Modalità di instradamento desiderata.
     pub fn configure(&mut self, channel_count: usize, mode: RoutingMode) -> bool {
-        if !(1..=8).contains(&channel_count) {
+        if !(1..=128).contains(&channel_count) {
             return false;
         }
         self.channel_count = channel_count;
