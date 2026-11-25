@@ -29,3 +29,4 @@ pub use core_dsp_modules::mix_mastering_fx;
 pub use core_dsp_modules::modulation_engine;
 pub use core_dsp_modules::mpc_sampler_engine;
 pub use core_dsp_modules::analog_summing;
+pub use core_dsp_modules::synth_engine;

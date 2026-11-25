@@ -35,3 +35,5 @@ pub mod mpc_sampler_engine;
 pub mod cabinet_speaker;
 pub mod acoustic_room;
 pub mod analog_summing;
+pub mod neural_capture;
+pub mod synth_engine;
