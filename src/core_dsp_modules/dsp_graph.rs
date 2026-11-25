@@ -9,7 +9,7 @@ use crate::core_dsp_modules::panic_protection::PanicProtection;
 use std::collections::VecDeque;
 
 /// Maximum number of audio channels supported per node in the graph.
-pub const MAX_AUDIO_CHANNELS: usize = 8;
+pub const MAX_AUDIO_CHANNELS: usize = 128;
 
 // ============================================================================
 // Trait DspGraphNode

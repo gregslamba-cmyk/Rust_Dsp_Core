@@ -3,14 +3,14 @@
 use std::f64::consts::PI;
 
 /// Maximum number of channels supported by the summing bus.
-pub const MAX_SUMMER_CHANNELS: usize = 32;
+pub const MAX_SUMMER_CHANNELS: usize = 128;
 
 /// Adjacent‑channel crosstalk matrix with one‑pole high‑pass coupling.
 pub struct AdjacentCrosstalkMatrix {
     crosstalk_db: f64,
     sample_rate: f64,
     coupling_alpha: f64,
-    previous: [f64; 8],
+    previous: Vec<f64>,
     num_channels: usize,
 }
 
@@ -24,7 +24,7 @@ impl AdjacentCrosstalkMatrix {
             crosstalk_db,
             sample_rate: sr,
             coupling_alpha: if crosstalk_db <= 0.0 { 0.0 } else { alpha *atten },
-            previous: [0.0; 8],
+            previous: vec![0.0; MAX_SUMMER_CHANNELS],
             num_channels: 2,
         }
     }
@@ -41,23 +41,36 @@ impl AdjacentCrosstalkMatrix {
         let omega = 2.0 * PI * 20.0 / self.sample_rate.max(1.0);
         let alpha = 1.0 - (-omega).exp();
         self.coupling_alpha = if self.crosstalk_db <= 0.0 { 0.0 } else { alpha * 10.0f64.powf(-self.crosstalk_db / 20.0) };
-        self.num_channels = self.num_channels.min(8);
     }
 
     pub fn reset(&mut self) {
         for s in self.previous.iter_mut() { *s = 0.0; }
-        self.num_channels = self.num_channels.min(8);
+    }
+
+    /// Sets number of channels dynamically (configurable up to MAX_SUMMER_CHANNELS).
+    /// Must be called outside the audio thread.
+    pub fn set_num_channels(&mut self, n: usize) {
+        let n = n.clamp(1, MAX_SUMMER_CHANNELS);
+        if self.previous.len() != n {
+            self.previous = vec![0.0; n];
+        }
+        self.num_channels = n;
+    }
+
+    /// Returns the currently configured number of channels.
+    pub fn num_channels(&self) -> usize {
+        self.num_channels
     }
 
     pub fn process(&mut self, channels: &mut [&mut [f64]], num_samples: usize) {
-        let nch = channels.len().min(8);
+        let nch = channels.len().min(self.previous.len()).max(1);
         let len = (0..nch)
             .map(|i| channels.get(i).map(|c| c.len()).unwrap_or(0))
             .min()
             .unwrap_or(0)
             .min(num_samples);
-        let mut x: [f64; 8] = [0.0; 8];
-        let mut y: [f64; 8] = [0.0; 8];
+        let mut x: [f64; MAX_SUMMER_CHANNELS] = [0.0; MAX_SUMMER_CHANNELS];
+        let mut y: [f64; MAX_SUMMER_CHANNELS] = [0.0; MAX_SUMMER_CHANNELS];
         let atten = if self.crosstalk_db <= 0.0 { 0.0 } else { 10.0f64.powf(-self.crosstalk_db / 20.0) };
         for k in 0..len {
             for i in 0..nch {
