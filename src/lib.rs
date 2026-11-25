@@ -14,6 +14,7 @@
     clippy::should_implement_trait,
     clippy::manual_slice_fill,
     clippy::manual_range_contains,
+    rustdoc::doc_list_item_overindented,
 )]
 #![allow(unused_variables)]
 #![allow(unused_assignments)]
