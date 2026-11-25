@@ -436,14 +436,16 @@ pub fn process_adaa2(x_n: f64, x_prev: f64, x_prev2: f64, drive: f64, mode: Nonl
     }
     let d1 = x_n - x_prev;
     let d2 = x_prev - x_prev2;
-    if d1.abs() < 1e-7 || d2.abs() < 1e-7 {
-        return process_adaa1(x_n, x_prev, drive, mode);
+    // Guardia numerica ADAA 2° ordine: se il prodotto delle differenze per drive è troppo piccolo,
+    // evita divisione per zero/denormale e fall back a ADAA1 o valutazione diretta.
+    if (d1 * d2 * drive).abs() < 1e-12 || d1.abs() < 1e-7 || d2.abs() < 1e-7 {
+        return flush_denormal(process_adaa1(x_n, x_prev, drive, mode));
     }
     let g_n = adaa_antiderivative2(x_n * drive, mode);
     let g_prev = adaa_antiderivative2(x_prev * drive, mode);
     let g_prev2 = adaa_antiderivative2(x_prev2 * drive, mode);
     let out = (g_n - 2.0 * g_prev + g_prev2) / (d1 * d2 * drive);
-    if out.is_finite() { out } else { 0.0 }
+    if out.is_finite() { flush_denormal(out) } else { 0.0 }
 }
 
 #[cfg(test)]
