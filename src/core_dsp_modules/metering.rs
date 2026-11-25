@@ -397,9 +397,85 @@ impl PhaseCorrelator3Band {
     }
 }
 
+/// Auto Gain Matcher: misura differenziale RMS/K-weighted tra ingresso e uscita
+/// per compensazione di ascolto opzionale (rigorosamente OFF di default per
+/// preservare il gain staging manuale).
+#[derive(Debug, Clone, Copy)]
+pub struct AutoGainMatcher {
+    enabled: bool,
+    target_rms_db: f32,
+    smoothing_ms: f64,
+    alpha: f64,
+    prev_compensation_db: f32,
+}
+
+impl Default for AutoGainMatcher {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_rms_db: -18.0, // 0 VU = -18 dBFS
+            smoothing_ms: 200.0,
+            alpha: 0.0,
+            prev_compensation_db: 0.0,
+        }
+    }
+}
+
+impl AutoGainMatcher {
+    /// Crea un nuovo matcher di guadagno automatico (disabilitato di default).
+    pub fn new() -> Self { Self::default() }
+
+    /// Attiva/disabilita il matcher (OFF di default).
+    pub fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+
+    /// Configura target RMS in dBFS e smoothing in ms.
+    pub fn initialize(&mut self, sample_rate: f64, smoothing_ms: f64) {
+        self.smoothing_ms = if smoothing_ms.is_finite() && smoothing_ms > 0.0 {
+            smoothing_ms
+        } else {
+            200.0
+        };
+        let tau = self.smoothing_ms / 1000.0;
+        self.alpha = if sample_rate.is_finite() && sample_rate > 0.0 && tau > 0.0 {
+            1.0 - (-1.0 / (tau * sample_rate)).exp()
+        } else {
+            0.0
+        };
+        self.reset();
+    }
+
+    /// Aggiorna la compensazione calcolata dal differenziale RMS ingresso/uscita.
+    /// Ritorna il guadagno di compensazione in dB (positivo = amplifica, negativo = attenua).
+    pub fn measure_compensation(&mut self, input_rms_db: f32, output_rms_db: f32) -> f32 {
+        if !self.enabled {
+            return 0.0;
+        }
+        let input = if input_rms_db.is_finite() { input_rms_db } else { METER_FLOOR_DBFS };
+        let output = if output_rms_db.is_finite() { output_rms_db } else { METER_FLOOR_DBFS };
+        // Differenziale: quanto l'uscita si discosta dall'ingresso
+        let delta_db = input - output;
+        // Compensazione limitata per evitare pompaggio eccessivo
+        let comp = delta_db.clamp(-6.0, 6.0);
+        // Smoothing esponenziale per evitare click
+        let smoothed = self.prev_compensation_db
+            + self.alpha as f32 * (comp - self.prev_compensation_db);
+        self.prev_compensation_db = smoothed;
+        smoothed
+    }
+
+    /// Ritorna l'ultima compensazione applicata in dB.
+    pub fn compensation_db(&self) -> f32 { self.prev_compensation_db }
+
+    /// Reset dello stato.
+    pub fn reset(&mut self) { self.prev_compensation_db = 0.0; }
+
+    /// Ritorna `true` se il matcher è abilitato.
+    pub fn is_enabled(&self) -> bool { self.enabled }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{METER_FLOOR_DBFS, MeterSnapshot, Metering};
+    use super::{AutoGainMatcher, METER_FLOOR_DBFS, MeterSnapshot, Metering};
 
     #[test]
     fn reports_block_peak_rms_and_maximum_gain_reduction() {
@@ -507,5 +583,32 @@ mod tests {
         let rms_value = (0.125_f32).sqrt(); // = sqrt(0.25^2 + (-0.25)^2) / 1 = sqrt(0.125)
         let expected_rms = 20.0 * rms_value.log10();
         assert!((snap.sidechain_input_rms_dbfs - expected_rms).abs() < 0.01);
+    }
+    #[test]
+    fn auto_gain_matcher_off_by_default() {
+        let mut agm = AutoGainMatcher::new();
+        assert!(!agm.is_enabled());
+        assert_eq!(agm.measure_compensation(-12.0, -12.0), 0.0);
+    }
+
+    #[test]
+    fn auto_gain_matcher_compensation_applied() {
+        let mut agm = AutoGainMatcher::new();
+        agm.set_enabled(true);
+        agm.initialize(48_000.0, 200.0);
+        // Input -12 dBFS, output -18 dBFS -> delta = +6 dB, clamped to 6.0
+        let comp = agm.measure_compensation(-12.0, -18.0);
+        assert!(comp > 0.0);
+        assert_eq!(agm.compensation_db(), comp);
+    }
+
+    #[test]
+    fn auto_gain_matcher_clamps_to_safe_range() {
+        let mut agm = AutoGainMatcher::new();
+        agm.set_enabled(true);
+        agm.initialize(48_000.0, 200.0);
+        // Differenziale molto ampio -> clamped a -6..+6 dB
+        let comp = agm.measure_compensation(0.0, -40.0);
+        assert!(comp <= 6.0 && comp >= -6.0);
     }
 }

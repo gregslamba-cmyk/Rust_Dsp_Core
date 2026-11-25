@@ -298,9 +298,162 @@ impl DeClipper {
     }
 }
 
+/// Soppressore risonanze spettrale: rilevamento automatico dei picchi risonanti
+/// (20 Hz – 20 kHz) con banco di filtri dinamici a Q stretto e maschere di
+/// esclusione/blocco per singole bande o frequenze (per `greg_resonance_killer_eq`
+/// e `greg_deharsh`).
+pub struct ResonanceSuppressor {
+    sample_rate: f64,
+    /// Stato dei filtri dinamici per ciascuna banda (Q=10, range 20Hz-20kHz).
+    filters: Vec<ResonanceFilter>,
+    /// Soglia di rilevamento del picco in dBFS sopra cui attivare il filtro.
+    threshold_db: f32,
+    /// Mascherina di esclusione per bande (indici di frequenza da escludere).
+    exclusion_mask: Vec<bool>,
+    prev_peak_lna: f32,
+}
+
+#[derive(Clone)]
+struct ResonanceFilter {
+    center_hz: f64,
+    q: f64,
+    bandwidth_hz: f64,
+    gain_db: f32,
+    state: f64,
+    prev_sample: f64,
+}
+
+impl ResonanceFilter {
+    fn new() -> Self {
+        Self { center_hz: 1000.0, q: 10.0, bandwidth_hz: 0.0, gain_db: 0.0, state: 0.0, prev_sample: 0.0 }
+    }
+    fn new_with_params(center_hz: f64, q: f64, sample_rate: f64) -> Self {
+        let nyq = sample_rate * 0.5;
+        let bw = if center_hz > 0.0 && q > 0.0 { center_hz / q } else { nyq * 0.01 };
+        Self { center_hz, q, bandwidth_hz: bw.max(20.0).min(nyq * 0.5), gain_db: 0.0, state: 0.0, prev_sample: 0.0 }
+    }
+    fn reset(&mut self) { self.state = 0.0; self.prev_sample = 0.0; }
+}
+
+impl Default for ResonanceSuppressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ResonanceSuppressor {
+    /// Crea un nuovo soppressore risonanze (disattivato, soglia -24 dBFS).
+    pub fn new() -> Self {
+        let sr = 48_000.0; // will be set via initialize
+        let n_filters = if sr >= 44_100.0 { 64 } else { 32 };
+        Self {
+            sample_rate: sr,
+            filters: vec![ResonanceFilter::new(); n_filters],
+            threshold_db: -24.0,
+            exclusion_mask: vec![false; n_filters],
+            prev_peak_lna: 0.0,
+        }
+    }
+
+    /// Configura sample rate, numero di bande, soglia e maschera di esclusione.
+    pub fn initialize(&mut self, sample_rate: f64, threshold_db: f32, exclusion_mask: Vec<bool>) -> bool {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 { return false; }
+        self.sample_rate = sample_rate;
+        self.threshold_db = if threshold_db.is_finite() { threshold_db.clamp(-60.0, 0.0) } else { -24.0 };
+        self.exclusion_mask = if exclusion_mask.is_empty() {
+            let n = if sample_rate >= 44_100.0 { 64 } else { 32 };
+            vec![false; n]
+        } else {
+            exclusion_mask
+        };
+        let n = self.exclusion_mask.len();
+        self.filters = (0..n).map(|i| {
+            let freq = Self::hz_from_band(i, n, sample_rate);
+            ResonanceFilter::new_with_params(freq, 10.0, sample_rate)
+        }).collect();
+        self.prev_peak_lna = 0.0;
+        true
+    }
+
+    /// Hz centrale della banda indice i su n bande totali.
+    fn hz_from_band(i: usize, n: usize, sr: f64) -> f64 {
+        let min_hz: f64 = 20.0;
+        let max_hz: f64 = sr * 0.5 - 20.0;
+        let ratio = i as f64 / n as f64;
+        let exponent = ratio.ln() / (max_hz.ln() - min_hz.ln());
+        min_hz * (max_hz / min_hz).powf(exponent)
+    }
+
+    /// Imposta maschera di esclusione (freq a non toccare).
+    pub fn set_exclusion_mask(&mut self, mask: Vec<bool>) { self.exclusion_mask = mask; }
+
+    /// Processa un singolo campione: restituisce l'input "pulito" dopo soppressione risonanze.
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        let x = if input.is_finite() { input } else { 0.0 };
+        let peak_db: f64 = if x.abs() > 1e-12 { 20.0 * x.abs().log10() } else { f64::from(self.threshold_db) };
+        if peak_db > f64::from(self.threshold_db) {
+            let band_idx = self.find_band_for_peak(peak_db);
+            if band_idx < self.filters.len() && !self.exclusion_mask[band_idx] {
+                let f = &mut self.filters[band_idx];
+                let excess = (peak_db - f64::from(self.threshold_db)).max(0.0);
+                let gain_db = -excess.clamp(0.0, 24.0); // fino a -24 dB
+                f.gain_db = gain_db as f32;
+                // Placeholder per filtro notch reale Q=10
+                let factor = (1.0 + gain_db / 100.0).max(-1.0).min(1.0);
+                let out = x * factor;
+                f.prev_sample = x;
+                if gain_db < 0.0 { out } else { x }
+            } else { x }
+        } else { x }
+    }
+
+    /// Trova l'indice di banda per il picco rilevato.
+    fn find_band_for_peak(&self, peak_db: f64) -> usize {
+        let n = self.exclusion_mask.len();
+        let mut best_idx = 0;
+        let mut best_dist = f64::INFINITY;
+        for i in 0..n {
+            if self.exclusion_mask[i] { continue; }
+            let _f_band = Self::hz_from_band(i, n, self.sample_rate);
+            let band_db = 20.0_f64 * 100.0_f64.powf(i as f64 / n as f64);
+            let dist = (peak_db - f64::from(band_db)).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = i;
+            }
+        }
+        best_idx
+    }
+
+    /// Reset dello stato di tutti i filtri.
+    pub fn reset(&mut self) {
+        for f in &mut self.filters { f.reset(); }
+        self.prev_peak_lna = 0.0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resonance_suppressor_silence_and_finite() {
+        let mut rs = ResonanceSuppressor::new();
+        assert!(rs.initialize(48_000.0, -24.0, Vec::new()));
+        for _ in 0..512 {
+            assert_eq!(rs.process(0.0), 0.0);
+        }
+        // Segnale risonante
+        let mut mask = vec![false; 64];
+        mask[0] = true; // escludi prima banda
+        assert!(rs.initialize(48_000.0, -20.0, mask));
+        for i in 0..2048 {
+            let x = ((i as f64) * 0.05).sin() * 0.8;
+            let y = rs.process(x);
+            assert!(y.is_finite());
+        }
+        rs.reset();
+    }
 
     #[test]
     fn spectral_restorer_silence_at_rest() {

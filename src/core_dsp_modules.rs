@@ -38,3 +38,4 @@ pub mod acoustic_room;
 pub mod analog_summing;
 pub mod neural_capture;
 pub mod synth_engine;
+pub mod music_theory;
