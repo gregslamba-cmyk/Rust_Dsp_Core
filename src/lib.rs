@@ -1,5 +1,6 @@
 #![allow(clippy::new_without_default)]
 #![forbid(unsafe_code)]
+#![allow(dead_code)]
 #![allow(
     clippy::doc_lazy_continuation,
     clippy::needless_range_loop,
@@ -9,7 +10,13 @@
     clippy::manual_clamp,
     clippy::unnecessary_cast,
     clippy::implicit_saturating_sub,
+    clippy::useless_conversion,
+    clippy::should_implement_trait,
+    clippy::manual_slice_fill,
+    clippy::manual_range_contains,
 )]
+#![allow(unused_variables)]
+#![allow(unused_assignments)]
 
 pub mod core_dsp_modules;
 
