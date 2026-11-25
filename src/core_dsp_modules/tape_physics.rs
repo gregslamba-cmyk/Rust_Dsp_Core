@@ -22,11 +22,14 @@
 
 use crate::core_dsp_modules::delay_lines::DelayLine;
 use crate::core_dsp_modules::filters::FilterType;
+use crate::core_dsp_modules::nonlinear_stages::flush_denormal;
 use crate::core_dsp_modules::zdf_filters::ZdfSvf;
 
 /// Tape speed standard affecting equalization time constants and head bump.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TapeSpeed {
+    /// 7.5 inches per second (19 cm/s) - compact cassette / consumer speed.
+    Ips7_5,
     /// 15 inches per second (38 cm/s) - standard studio speed.
     #[default]
     Ips15,
@@ -38,6 +41,8 @@ impl TapeSpeed {
     /// Pre-emphasis time constant (microseconds) for the given standard.
     pub fn pre_emphasis_us(self, standard: TapeStandard) -> f64 {
         match (self, standard) {
+            (TapeSpeed::Ips7_5, TapeStandard::Nab) => 45.0,
+            (TapeSpeed::Ips7_5, TapeStandard::Ccir) => 60.0,
             (TapeSpeed::Ips15, TapeStandard::Nab) => 50.0,
             (TapeSpeed::Ips30, TapeStandard::Nab) => 35.0,
             (TapeSpeed::Ips15, TapeStandard::Ccir) => 70.0,
@@ -53,6 +58,7 @@ impl TapeSpeed {
     /// Head bump corner frequency (Hz).
     pub fn head_bump_hz(self) -> f64 {
         match self {
+            TapeSpeed::Ips7_5 => 45.0,
             TapeSpeed::Ips15 => 65.0,
             TapeSpeed::Ips30 => 110.0,
         }
@@ -60,12 +66,20 @@ impl TapeSpeed {
 
     /// Head bump resonance Q.
     pub fn head_bump_q(self) -> f64 {
-        1.2
+        match self {
+            TapeSpeed::Ips7_5 => 1.5,
+            TapeSpeed::Ips15 => 1.2,
+            TapeSpeed::Ips30 => 1.0,
+        }
     }
 
     /// Head bump gain boost (dB).
     pub fn head_bump_gain_db(self) -> f64 {
-        3.0
+        match self {
+            TapeSpeed::Ips7_5 => 4.5,
+            TapeSpeed::Ips15 => 3.0,
+            TapeSpeed::Ips30 => 2.0,
+        }
     }
 }
 
@@ -209,6 +223,53 @@ impl HeadBump {
     }
 }
 
+/// Gap-loss / auto-smagnetization high-frequency loss filter.
+/// Models the high-frequency loss caused by finite tape gap width and
+/// self-demagnetization at high frequencies.
+struct GapLoss {
+    state: f64,
+    alpha: f64,
+    enabled: bool,
+}
+
+impl Default for GapLoss {
+    fn default() -> Self {
+        Self { state: 0.0, alpha: 0.0, enabled: false }
+    }
+}
+
+impl GapLoss {
+    fn configure(&mut self, sample_rate: f64, speed: TapeSpeed) -> bool {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return false;
+        }
+        // Gap-loss corner frequency: inversely proportional to tape speed.
+        let fc = match speed {
+            TapeSpeed::Ips7_5 => 6000.0,
+            TapeSpeed::Ips15 => 10000.0,
+            TapeSpeed::Ips30 => 16000.0,
+        };
+        // One-pole low-pass coefficient.
+        let g = (std::f64::consts::PI * fc / sample_rate).tan();
+        self.alpha = g / (1.0 + g);
+        self.enabled = true;
+        true
+    }
+
+    #[inline]
+    fn process(&mut self, input: f64) -> f64 {
+        if !self.enabled {
+            return input;
+        }
+        self.state += self.alpha * (input - self.state);
+        flush_denormal(self.state)
+    }
+
+    fn reset(&mut self) {
+        self.state = 0.0;
+    }
+}
+
 /// Wow & Flutter: block-rate LFO modulation of a fractional delay line.
 struct WowFlutter {
     delay_line: DelayLine,
@@ -293,6 +354,7 @@ pub struct TapePhysics {
     standard: TapeStandard,
     emphasis: TapeEmphasis,
     head_bump: HeadBump,
+    gap_loss: GapLoss,
     hysteresis: JilesAtherton,
     wow_flutter: WowFlutter,
     input_gain: f64,
@@ -309,6 +371,7 @@ impl Default for TapePhysics {
             standard: TapeStandard::default(),
             emphasis: TapeEmphasis::default(),
             head_bump: HeadBump::default(),
+            gap_loss: GapLoss::default(),
             hysteresis: JilesAtherton::new_tape(),
             wow_flutter: WowFlutter::default(),
             input_gain: 1.0,
@@ -333,7 +396,8 @@ impl TapePhysics {
         self.standard = standard;
         let ok1 = self.emphasis.configure(sample_rate, speed, standard);
         let ok2 = self.head_bump.configure(sample_rate, speed);
-        ok1 && ok2
+        let ok3 = self.gap_loss.configure(sample_rate, speed);
+        ok1 && ok2 && ok3
     }
 
     /// Sets drive: input gain (dB), saturation (0..1), AC bias (0..1).
@@ -343,6 +407,9 @@ impl TapePhysics {
         self.bias = bias.clamp(0.0, 1.0);
         let k = 400.0 + 1600.0 * self.saturation;
         self.hysteresis.set_hysteresis_width(k);
+        // Gap loss (high-frequency loss) engages only when real tape
+        // degradation is applied; with unity drive the signal must pass through untouched.
+        self.gap_loss.enabled = self.saturation > 0.0 || (self.input_gain - 1.0).abs() > 0.0 || self.bias > 0.0;
     }
 
     /// Sets wow & flutter depth in milliseconds.
@@ -361,6 +428,7 @@ impl TapePhysics {
         let x = if input.is_finite() { input } else { 0.0 };
         let x = self.emphasis.process_pre(x);
         let x = self.head_bump.process(x);
+        let x = self.gap_loss.process(x);
         let x = x * self.input_gain + self.bias * 0.1;
         let x = self.hysteresis.process(x);
         let x = self.wow_flutter.process_sample(x);

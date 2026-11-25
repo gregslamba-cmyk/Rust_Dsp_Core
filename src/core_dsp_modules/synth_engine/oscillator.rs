@@ -56,6 +56,7 @@ impl Oscillator {
             OscillatorWaveform::Saw => {
                 let mut v = 2.0 * self.phase - 1.0;
                 v -= self.polyblep(self.phase);
+                v += self.polyblep((self.phase + 0.5) % 1.0);
                 v
             }
             OscillatorWaveform::Triangle => {
@@ -66,6 +67,8 @@ impl Oscillator {
                 };
                 v += self.polyblep(self.phase);
                 v -= self.polyblep((self.phase + 0.5) % 1.0);
+                v -= self.polyblamp(self.phase);
+                v -= self.polyblamp((self.phase + 0.5) % 1.0);
                 v
             }
             OscillatorWaveform::Noise => self.noise(),
@@ -85,6 +88,30 @@ impl Oscillator {
         } else if t > 1.0 - dt {
             let t = (t - 1.0) / dt;
             t * t + t + t + 1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// PolyBLAMP correction (Polynomial Band-Limited Amplitude Preservation).
+    /// Similar to PolyBLEP but uses a different polynomial shape for the leading
+    /// edge correction, providing improved high-frequency roll-off for certain
+    /// waveforms while maintaining zero aliasing at 1x sample rate.
+    fn polyblamp(&self, t: f64) -> f64 {
+        let inc = (self.phase - self.last_phase).abs();
+        if inc <= 0.0 || inc >= 1.0 {
+            return 0.0;
+        }
+        let dt = inc;
+        // Polynomial of order 3 with smooth Hermite interpolation at boundaries.
+        if t < dt {
+            let t = t / dt;
+            // 2t^3 - 3t^2 + 1 (Hermite basis, unity at t=0, zero at t=1)
+            2.0 * t * t * t - 3.0 * t * t + 1.0
+        } else if t > 1.0 - dt {
+            let t = (t - 1.0) / dt;
+            // Symmetric to the leading edge: -2t^3 + 3t^2
+            -2.0 * t * t * t + 3.0 * t * t
         } else {
             0.0
         }

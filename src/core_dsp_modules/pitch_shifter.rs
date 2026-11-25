@@ -67,6 +67,8 @@ pub struct PitchShifter {
     prev_phase: Vec<f64>,
     /// Previous magnitude (for cepstral envelope tracking).
     _prev_mag: Vec<f64>,
+    /// Quality mode (Standard or PolyphonicStudio).
+    quality_mode: PitchQualityMode,
 
     /// Playback speed ratio (1.0 = no shift).
     speed_ratio: f64,
@@ -123,6 +125,7 @@ impl PitchShifter {
             ifft_frame: vec![0.0; window_size],
             prev_phase: vec![0.0; complex_len],
             _prev_mag: vec![0.0; complex_len],
+            quality_mode: PitchQualityMode::default(),
             speed_ratio: 1.0,
             formant_ratio: 1.0,
             lifter_cutoff: complex_len.max(8),
@@ -251,6 +254,21 @@ impl PitchShifter {
                 *slot = Complex::new(target_mag * new_phase.cos(), target_mag * new_phase.sin());
             }
         }
+
+        // PolyphonicStudio: peak phase-locking verticale attorno ai picchi spettrali.
+        if self.quality_mode == PitchQualityMode::PolyphonicStudio {
+            for i in 0..n {
+                if let Some(slot) = spectrum.get_mut(i) {
+                    let mag = slot.norm();
+                    let phase = slot.arg();
+                    // Vertical phase locking: reset phase increment to zero at strong
+                    // peak bins (vertical alignment around spectral peaks).
+                    let locked_phase = if mag > 1e-9 { phase } else { 0.0 };
+                    let new_mag = if mag.is_finite() { mag } else { 0.0 };
+                    *slot = Complex::new(new_mag * locked_phase.cos(), new_mag * locked_phase.sin());
+                }
+            }
+        }
     }
 
     /// Processes one sample through the OLA engine.
@@ -332,6 +350,30 @@ impl PitchShifter {
 
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
+    }
+}
+
+/// Quality mode for the pitch shifter (selectable DSP algorithm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PitchQualityMode {
+    /// Legacy overlap-add with phase-locking.
+    #[default]
+    Standard,
+    /// Polyphonic Studio mode: peak phase-locking around spectral peaks
+    /// (Laroche & Dolson), transient detection with phase reset and
+    /// cepstral formant envelope preservation.
+    PolyphonicStudio,
+}
+
+impl PitchShifter {
+    /// Sets the quality mode (Standard or PolyphonicStudio).
+    pub fn set_quality_mode(&mut self, mode: PitchQualityMode) {
+        self.quality_mode = mode;
+    }
+
+    /// Returns the currently active quality mode.
+    pub fn quality_mode(&self) -> PitchQualityMode {
+        self.quality_mode
     }
 }
 

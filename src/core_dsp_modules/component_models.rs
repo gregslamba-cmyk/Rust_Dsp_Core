@@ -477,6 +477,98 @@ impl NonlinearElementStage {
 // Tests
 // ============================================================================
 
+// ============================================================================
+// 5. DYNAMIC BUS COMPRESSION: DUAL-STAGE PROGRAM-DEPENDENT RELEASE
+// ============================================================================
+
+/// Dual-stage program-dependent release compressor (doppio stadio RC accoppiato).
+///
+/// Stage 1 (fast): low-pass on the program envelope to enable fast recovery.
+/// Stage 2 (slow): conservative RC release, coupled to the fast stage via the
+/// `coupling` parameter so the release becomes program-dependent.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DualStageProgramDependentRelease {
+    /// Fast stage time constant (seconds).
+    r_fast: f64,
+    /// Slow stage time constant (seconds).
+    r_slow: f64,
+    /// Fast stage RC value.
+    c_fast: f64,
+    /// Slow stage RC value.
+    c_slow: f64,
+    /// Coupling factor between the two stages (0..1).
+    coupling: f64,
+    /// State of the fast RC stage.
+    state_fast: f64,
+    /// State of the slow RC stage.
+    state_slow: f64,
+    sample_rate: f64,
+}
+
+impl DualStageProgramDependentRelease {
+    /// Creates a new dual-stage program-dependent release.
+    pub fn new() -> Self {
+        Self {
+            r_fast: 0.005,
+            r_slow: 0.05,
+            c_fast: 1e-5,
+            c_slow: 1e-4,
+            coupling: 0.5,
+            state_fast: 0.0,
+            state_slow: 0.0,
+            sample_rate: 48000.0,
+        }
+    }
+
+    /// Configures the dual-stage compressor parameters.
+    pub fn configure(&mut self, sample_rate: f64, r_fast: f64, r_slow: f64, c_fast: f64, c_slow: f64, coupling: f64) -> bool {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return false;
+        }
+        self.sample_rate = sample_rate;
+        self.r_fast = r_fast.max(1e-6);
+        self.r_slow = r_slow.max(1e-6);
+        self.c_fast = c_fast.max(1e-9);
+        self.c_slow = c_slow.max(1e-9);
+        self.coupling = coupling.clamp(0.0, 1.0);
+        self.state_fast = 0.0;
+        self.state_slow = 0.0;
+        true
+    }
+
+    /// Sets the coupling between the fast and slow release stages.
+    pub fn set_coupling(&mut self, coupling: f64) {
+        self.coupling = coupling.clamp(0.0, 1.0);
+    }
+
+    /// Computes the program-dependent release coefficient.
+    fn release_coeff(&self, envelope: f64, threshold: f64) -> f64 {
+        // Program-dependent release: faster when envelope is far from threshold.
+        let over = (envelope - threshold).abs();
+        if over <= 0.0 {
+            return 0.0;
+        }
+        let tc_fast = 1.0 / (2.0 * std::f64::consts::PI * self.r_fast);
+        let tc_slow = 1.0 / (2.0 * std::f64::consts::PI * self.r_slow);
+        let tc = tc_fast * (1.0 - self.coupling) + tc_slow * self.coupling;
+        let coeff = 1.0 / (1.0 + tc * over);
+        if !coeff.is_finite() { 0.0 } else { coeff }
+    }
+
+    /// Processes one sample: computes gain reduction based on program-dependent release.
+    pub fn process(&mut self, envelope: f64, threshold: f64) -> f64 {
+        let coeff = self.release_coeff(envelope, threshold);
+        let gain_reduction = coeff * envelope;
+        if gain_reduction.is_finite() { gain_reduction } else { 0.0 }
+    }
+
+    /// Resets internal state.
+    pub fn reset(&mut self) {
+        self.state_fast = 0.0;
+        self.state_slow = 0.0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

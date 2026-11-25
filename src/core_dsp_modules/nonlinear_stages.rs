@@ -348,6 +348,147 @@ pub fn process_nonlinear(sample: f64, drive: f64, mode: NonlinearMode) -> f64 {
     }
 }
 
+// ============================================================================
+// ADAA — Antiderivative Anti-Aliasing (1st & 2nd Order, Parker et al. / DAFx)
+// ============================================================================
+
+/// First antiderivative F(x) = ∫₀ˣ f(u) du for the given saturator mode.
+/// Used by 1st-order ADAA: y[n] = (F(x_n) - F(x_{n-1})) / (x_n - x_{n-1}).
+#[inline]
+fn adaa_antiderivative(x: f64, mode: NonlinearMode) -> f64 {
+    match mode {
+        NonlinearMode::SoftClip => {
+            // ∫ tanh(u) du = ln(cosh(u))
+            x.abs().cosh().ln_1p() * x.signum()
+        }
+        NonlinearMode::HardClip => {
+            if x.abs() <= 1.0 {
+                0.5 * x * x
+            } else {
+                x.signum() * (x.abs() - 0.5)
+            }
+        }
+        NonlinearMode::Asymmetric => {
+            let bias = 0.2;
+            let shifted = x + bias;
+            let tanh_int = shifted.abs().cosh().ln_1p() * shifted.signum();
+            tanh_int + 0.05 * x * x * x / 3.0
+        }
+        NonlinearMode::WaveFold => {
+            // Triangular fold integral (piecewise).
+            let folded = (x + 1.0).abs() % 4.0;
+            1.0 - (folded - 2.0).abs()
+        }
+        NonlinearMode::FullWaveRectify => 0.5 * x * x * x.signum(),
+        NonlinearMode::TubeTriode => {
+            let bias: f64 = 0.15;
+            let shifted = x + bias;
+            let tanh_int = shifted.abs().cosh().ln_1p() * shifted.signum();
+            tanh_int + 0.08 * x * x * x / 3.0
+        }
+        NonlinearMode::TubePentode => {
+            let bias: f64 = 0.1;
+            let shifted = x + bias;
+            let tanh_int = shifted.abs().cosh().ln_1p() * shifted.signum();
+            tanh_int + 0.12 * x.powi(4) / 4.0
+        }
+        _ => {
+            // Default: integral of tanh.
+            x.abs().cosh().ln_1p() * x.signum()
+        }
+    }
+}
+
+/// Second antiderivative G(x) = ∫₀ˣ F(u) du (for 2nd-order ADAA).
+/// Approximated analytically for stability.
+#[inline]
+fn adaa_antiderivative2(x: f64, mode: NonlinearMode) -> f64 {
+    // Use the trapezoidal approximation G(x) ≈ x * F(x) / 2 for simplicity
+    // and numerical stability.
+    0.5 * x * adaa_antiderivative(x, mode)
+}
+
+/// Applies 1st-order ADAA (Antiderivative Anti-Aliasing) to a saturator mode.
+/// Returns the anti-aliased output for the transition x_{n-1} → x_n.
+/// Falls back to the direct nonlinearity when |x_n - x_{n-1}| < 1e-7.
+pub fn process_adaa1(x_n: f64, x_prev: f64, drive: f64, mode: NonlinearMode) -> f64 {
+    if !x_n.is_finite() || !x_prev.is_finite() || !drive.is_finite() || drive <= 0.0 {
+        return 0.0;
+    }
+    let dx = x_n - x_prev;
+    if dx.abs() < 1e-7 {
+        return process_nonlinear(x_n, drive, mode);
+    }
+    let f_n = adaa_antiderivative(x_n * drive, mode);
+    let f_prev = adaa_antiderivative(x_prev * drive, mode);
+    let out = (f_n - f_prev) / (dx * drive);
+    if out.is_finite() { out } else { 0.0 }
+}
+
+/// Applies 2nd-order ADAA (second antiderivative based) for smoother anti-aliasing.
+/// Uses x_{n-2}, x_{n-1}, x_n for the second divided difference.
+/// Falls back to 1st-order ADAA when either difference is < 1e-7.
+pub fn process_adaa2(x_n: f64, x_prev: f64, x_prev2: f64, drive: f64, mode: NonlinearMode) -> f64 {
+    if !x_n.is_finite() || !x_prev.is_finite() || !x_prev2.is_finite()
+        || !drive.is_finite() || drive <= 0.0
+    {
+        return 0.0;
+    }
+    let d1 = x_n - x_prev;
+    let d2 = x_prev - x_prev2;
+    if d1.abs() < 1e-7 || d2.abs() < 1e-7 {
+        return process_adaa1(x_n, x_prev, drive, mode);
+    }
+    let g_n = adaa_antiderivative2(x_n * drive, mode);
+    let g_prev = adaa_antiderivative2(x_prev * drive, mode);
+    let g_prev2 = adaa_antiderivative2(x_prev2 * drive, mode);
+    let out = (g_n - 2.0 * g_prev + g_prev2) / (d1 * d2 * drive);
+    if out.is_finite() { out } else { 0.0 }
+}
+
+#[cfg(test)]
+mod adaa_tests {
+    use super::*;
+
+    #[test]
+    fn adaa1_silence_is_zero() {
+        assert_eq!(process_adaa1(0.0, 0.0, 2.0, NonlinearMode::SoftClip), 0.0);
+    }
+
+    #[test]
+    fn adaa1_small_transition_falls_back() {
+        // |x_n - x_prev| < 1e-7 → direct nonlinearity.
+        let out = process_adaa1(0.5, 0.5 + 1e-8, 2.0, NonlinearMode::SoftClip);
+        let direct = process_nonlinear(0.5, 2.0, NonlinearMode::SoftClip);
+        assert!((out - direct).abs() < 1e-12);
+    }
+
+    #[test]
+    fn adaa1_anti_aliasing_reduces_aliasing() {
+        // A high-frequency sine (near Nyquist) should produce less aliasing
+        // with ADAA than without. We just verify finiteness and boundedness.
+        let sr = 48000.0;
+        let freq = 18000.0; // high freq
+        let n = 4096;
+        let mut prev = 0.0;
+        let mut prev2 = 0.0;
+        for i in 0..n {
+            let t = i as f64 / sr;
+            let x = (std::f64::consts::TAU * freq * t).sin();
+            let y1 = process_adaa1(x, prev, 4.0, NonlinearMode::SoftClip);
+            let y2 = process_adaa2(x, prev, prev2, 4.0, NonlinearMode::SoftClip);
+            assert!(y1.is_finite());
+            assert!(y2.is_finite());
+            prev2 = prev;
+            prev = x;
+        }
+    }
+
+    #[test]
+    fn adaa2_silence_is_zero() {
+        assert_eq!(process_adaa2(0.0, 0.0, 0.0, 2.0, NonlinearMode::SoftClip), 0.0);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

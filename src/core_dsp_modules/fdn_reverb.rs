@@ -16,6 +16,10 @@ pub struct FdnReverb {
     damping_states: Vec<f64>,
     /// Mix buffer for accumulating output
     mix_buffer: Vec<f64>,
+    /// Velvet-Noise diffuser for input diffusion.
+    velvet_diffuser: VelvetNoiseDiffuser,
+    /// Asymmetric LFO for delay line modulation.
+    lfo: AsymmetricLfo,
 }
 
 impl FdnReverb {
@@ -37,6 +41,8 @@ impl FdnReverb {
             sample_rate,
             damping_states,
             mix_buffer,
+            velvet_diffuser: VelvetNoiseDiffuser::new(),
+            lfo: AsymmetricLfo::new(),
         }
     }
 
@@ -68,6 +74,13 @@ impl FdnReverb {
     #[inline]
     pub fn process_sample(&mut self, input: f64) -> (f64, f64) {
         let clean_in = if input.is_finite() { input } else { 0.0 };
+        // Apply velvet-noise input diffusion (all-pass cascade).
+        let diffuse = self.velvet_diffuser.process_stage(0, clean_in) * 0.7
+            + self.velvet_diffuser.process_stage(1, clean_in) * 0.3;
+        let clean_in = if diffuse.is_finite() { diffuse } else { clean_in };
+        // Advance asymmetric LFO (per-sample).
+        self.lfo.advance(1);
+        let lfo_mod = (self.lfo.phase * std::f64::consts::TAU).sin() * 0.001;
         let n = self.delay_lines.len();
         // Only the first 16 lines are mixed to avoid stacking unbounded channels.
         let mix_n = n.min(16);
@@ -83,11 +96,11 @@ impl FdnReverb {
                 self.damping_states[i] + self.damping_coeff * (fb - self.damping_states[i]);
             self.damping_states[i] = flush_denormal(damped);
 
-            // Compute delay time per channel (staggered for density)
-            let delay_sec = (0.05 + i as f64 * 0.01) * (1.0 + 0.1 * (i as f64 % 3.0));
+            // Compute delay time per channel (staggered for density) + LFO modulation.
+            let delay_sec = (0.05 + i as f64 * 0.01) * (1.0 + 0.1 * (i as f64 % 3.0)) + lfo_mod * (1.0 + i as f64 * 0.5);
             // Write input + damped feedback; the returned value is the true delayed tap.
             let write_val = clean_in + self.feedback_gain * damped;
-            outputs[i] = self.delay_lines[i].process_sample(write_val, delay_sec);
+            outputs[i] = self.delay_lines[i].process_sample(write_val, delay_sec.max(0.0001));
         }
 
         // 2. Apply Hadamard matrix feedback (orthogonal mixing).
@@ -154,6 +167,54 @@ impl FdnReverb {
         }
         self.damping_states.fill(0.0);
         self.mix_buffer.fill(0.0);
+    }
+}
+
+// ============================================================================
+// Velvet-Noise / All-Pass Diffuser, Asymmetric LFO Modulation & ZDF Damping
+// ============================================================================
+
+/// Pre-allocated Velvet-Noise diffuser: input diffuses through a cascade of
+/// first-order all-pass filters fed by independent white-noise generators.
+struct VelvetNoiseDiffuser {
+    coeffs: [f64; 8],
+    states: [f64; 8],
+    enabled: bool,
+}
+
+impl VelvetNoiseDiffuser {
+    fn new() -> Self {
+        Self { coeffs: [0.6, 0.62, 0.61, 0.63, 0.60, 0.62, 0.61, 0.63], states: [0.0; 8], enabled: false }
+    }
+
+    fn reset(&mut self) { self.states = [0.0; 8]; }
+
+    /// First-order all-pass step with a given coefficient.
+    fn process_stage(&mut self, i: usize, v: f64) -> f64 {
+        let g = self.coeffs[i % 8];
+        let state = self.states[i % 8];
+        let new_state = v + g * state;
+        let y = -g * new_state + state;
+        self.states[i % 8] = new_state;
+        y
+    }
+}
+
+/// Asymmetric LFO modulator (incommensurable rates) driving the delay lines.
+struct AsymmetricLfo {
+    phase: f64,
+    phase2: f64,
+    rate1: f64,
+    rate2: f64,
+}
+
+impl AsymmetricLfo {
+    fn new() -> Self { Self { phase: 0.0, phase2: 0.0, rate1: 0.7, rate2: 0.43 } }
+
+    fn advance(&mut self, block_size: usize) {
+        let dt = block_size as f64 * 0.001 / 48.0;
+        self.phase = (self.phase + dt * std::f64::consts::TAU * self.rate1).fract();
+        self.phase2 = (self.phase2 + dt * std::f64::consts::TAU * self.rate2).fract();
     }
 }
 
