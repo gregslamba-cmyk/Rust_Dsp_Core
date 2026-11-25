@@ -57,7 +57,7 @@ impl SynthEngine {
                 return true;
             }
         }
-        for i in 0..self.num_voices {
+        if let Some(i) = (0..self.num_voices).next() {
             self.voices[i].note_on(note_number, velocity, self.sample_rate);
             self.mpe.handle_note_on(1, note_number, velocity);
             return true;
