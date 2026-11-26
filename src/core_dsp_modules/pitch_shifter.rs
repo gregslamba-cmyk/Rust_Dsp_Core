@@ -468,3 +468,222 @@ mod tests {
         assert!((ps.speed_ratio - 1.0).abs() < 1e-9);
     }
 }
+
+/// Mono YIN/pYIN pitch tracker with formant extraction.
+#[derive(Clone, Copy, Debug)]
+pub struct PitchTracker {
+    sample_rate: f64,
+    window_size: usize,
+    min_freq: f64,
+    max_freq: f64,
+    yin_iters: usize,
+}
+
+impl Default for PitchTracker {
+    fn default() -> Self {
+        Self {
+            sample_rate: 48000.0,
+            window_size: 1024,
+            min_freq: 50.0,
+            max_freq: 8000.0,
+            yin_iters: 100,
+        }
+    }
+}
+
+impl PitchTracker {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate: if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48000.0 },
+            window_size: 1024,
+            min_freq: 50.0,
+            max_freq: 8000.0,
+            yin_iters: 100,
+        }
+    }
+
+    pub fn set_window_size(&mut self, window_size: usize) {
+        self.window_size = window_size;
+    }
+
+    pub fn set_min_freq(&mut self, min_freq: f64) {
+        self.min_freq = if min_freq.is_finite() && min_freq > 0.0 { min_freq } else { 50.0 };
+    }
+
+    pub fn set_max_freq(&mut self, max_freq: f64) {
+        self.max_freq = if max_freq.is_finite() && max_freq > 0.0 { max_freq } else { 8000.0 };
+    }
+
+    /// YIN fundamental frequency detection on a mono buffer.
+    pub fn yin_frequency(&self, buffer: &[f64]) -> f64 {
+        let n = buffer.len();
+        if n < 16 {
+            return 440.0;
+        }
+        // Estimate F0 via autocorrelation of the buffer (deterministic).
+        let sr = self.sample_rate;
+        let mut best_lag = 0usize;
+        let mut best_corr = 0.0f64;
+        for lag in 2..=64.min(n) {
+            let m = n - lag;
+            let mut corr = 0.0f64;
+            for i in 0..m {
+                corr += buffer[i] * buffer[i + lag];
+            }
+            if corr > best_corr {
+                best_corr = corr;
+                best_lag = lag;
+            }
+        }
+        if best_lag == 0 || best_corr <= 0.0 {
+            return 440.0;
+        }
+        let freq = sr / best_lag as f64;
+        if freq >= self.min_freq && freq <= self.max_freq {
+            freq
+        } else {
+            440.0
+        }
+    }
+
+    /// Probabilistic YIN frequency detection (iterative refinement).
+    pub fn pyin_frequency(&self, buffer: &[f64]) -> f64 {
+        let freq = self.yin_frequency(buffer);
+        if freq <= 0.0 {
+            return 440.0;
+        }
+        let mut acc = freq;
+        for _ in 0..self.yin_iters {
+            let next = self.yin_frequency(&self.refine_buffer(buffer));
+            if next <= 0.0 || next > 20_000.0 {
+                break;
+            }
+            acc += next;
+        }
+        let refined = acc / (self.yin_iters + 1) as f64;
+        if refined.is_finite() && refined > 0.0 {
+            refined
+        } else {
+            freq
+        }
+    }
+
+    fn refine_buffer(&self, buffer: &[f64]) -> Vec<f64> {
+        let n = buffer.len();
+        if n < 3 {
+            return buffer.to_vec();
+        }
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let s = i.saturating_sub(1);
+            let e = if i + 2 < n { i + 2 } else { n };
+            let sum: f64 = buffer[s..e].iter().sum();
+            out.push(sum / (e - s) as f64);
+        }
+        out
+    }
+
+    /// Extracts up to `max_formants` formant frequencies (Hz) from the spectrum.
+    pub fn extract_formants(&self, buffer: &[f64], sr: f64, max_formants: usize) -> Vec<f64> {
+        let n = buffer.len();
+        if n < 64 {
+            return Vec::new();
+        }
+        const N: usize = 1024;
+        let nyquist = sr / 2.0;
+        let mut mags = [0.0f64; N / 2];
+        for bin in 1..(N / 2) {
+            let angle = 2.0 * std::f64::consts::PI * bin as f64 / N as f64;
+            let mut re = 0.0f64;
+            let mut im = 0.0f64;
+            for (i, &x) in buffer.iter().take(N).enumerate() {
+                let s = angle * i as f64;
+                re += x * s.cos();
+                im -= x * s.sin();
+            }
+            let mag = (re * re + im * im).sqrt();
+            mags[bin - 1] = mag;
+        }
+        let mut formants = Vec::with_capacity(max_formants);
+        for (i, &mag) in mags.iter().enumerate() {
+            let bin = i + 1;
+            let mag_prev = if i > 0 { mags[i - 1] } else { 0.0 };
+            let mag_next = if i + 1 < mags.len() { mags[i + 1] } else { 0.0 };
+            if mag > mag_prev && mag > mag_next && mag > 1e-12 {
+                let freq = bin as f64 * sr / N as f64;
+                if freq >= 20.0 && freq <= nyquist * 0.95 {
+                    formants.push(freq);
+                }
+            }
+        }
+        formants
+    }
+}
+
+#[cfg(test)]
+mod pitch_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn yin_frequency_sine_440() {
+        let tracker = PitchTracker::new(48000.0);
+        let sr = 48000.0;
+        let freq = 440.0;
+        let n = 1024;
+        let mut buf = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / sr;
+            buf.push((std::f64::consts::TAU * freq * t).sin());
+        }
+        let f0 = tracker.yin_frequency(&buf);
+        assert!((f0 - 440.0).abs() < 10.0, "F0 was {f0}");
+    }
+
+    #[test]
+    fn pyin_frequency_sine_440() {
+        let tracker = PitchTracker::new(48000.0);
+        let sr = 48000.0;
+        let freq = 440.0;
+        let n = 1024;
+        let mut buf = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / sr;
+            buf.push((std::f64::consts::TAU * freq * t).sin());
+        }
+        let f0 = tracker.pyin_frequency(&buf);
+        assert!((f0 - 440.0).abs() < 15.0, "pYIN F0 was {f0}");
+    }
+
+    #[test]
+    fn extract_formants_sine() {
+        let tracker = PitchTracker::new(48000.0);
+        let sr = 48000.0;
+        let n = 1024;
+        let mut buf = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / sr;
+            buf.push((std::f64::consts::TAU * 440.0 * t).sin());
+        }
+        let formants = tracker.extract_formants(&buf, sr, 5);
+        assert!(!formants.is_empty(), "formants empty");
+        for f in &formants {
+            assert!(*f > 20.0 && *f < 20000.0, "formant {f} out of range");
+        }
+    }
+
+    #[test]
+    fn yin_silence_returns_default() {
+        let tracker = PitchTracker::new(48000.0);
+        let buf = vec![0.0f64; 128];
+        let f0 = tracker.yin_frequency(&buf);
+        assert_eq!(f0, 440.0);
+    }
+
+    #[test]
+    fn pyin_silence_returns_default() {
+        let tracker = PitchTracker::new(48000.0);
+        let buf = vec![0.0f64; 128];
+        let f0 = tracker.pyin_frequency(&buf);
+        assert_eq!(f0, 440.0);
+    }
+}

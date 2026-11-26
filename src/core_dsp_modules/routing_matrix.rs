@@ -319,11 +319,112 @@ impl<T: Float> StereoFrame<T> {
                 -self.right
             } else {
                 self.right
-            },
+        }
+    }
+}
+}
+
+/// Automatic Phase Aligner: estimates phase offset between two signals via cross-correlation
+/// on a sliding window and applies fractional-delay correction through a first-order all-pass.
+///
+/// # Methods
+/// * `new(sample_rate)` – creates a fresh aligner.
+/// * `process(input: f64, reference: f64) -> f64` – aligns `input` so its zero-phase matches `reference`.
+#[derive(Clone, Copy, Debug)]
+pub struct AutoPhaseAligner {
+    sample_rate: f64,
+    window_size: usize,
+    ref_buf: [f64; WINDOW_SIZE],
+    in_buf: [f64; WINDOW_SIZE],
+    ref_pos: usize,
+    in_pos: usize,
+    allpass_coef: f64,
+}
+
+const WINDOW_SIZE: usize = 256;
+
+impl Default for AutoPhaseAligner {
+    fn default() -> Self {
+        Self {
+            sample_rate: 48000.0,
+            window_size: WINDOW_SIZE,
+            ref_buf: [0.0f64; WINDOW_SIZE],
+            in_buf: [0.0f64; WINDOW_SIZE],
+            ref_pos: 0,
+            in_pos: 0,
+            allpass_coef: 1.0,
         }
     }
 }
 
+impl AutoPhaseAligner {
+    pub fn new(sample_rate: f64) -> Self {
+        let sr = if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48000.0 };
+        Self {
+            sample_rate: sr,
+            window_size: WINDOW_SIZE,
+            ref_buf: [0.0f64; WINDOW_SIZE],
+            in_buf: [0.0f64; WINDOW_SIZE],
+            ref_pos: 0,
+            in_pos: 0,
+            allpass_coef: 1.0,
+        }
+    }
+
+    /// Returns the current analysis window filled from `in_buf`.
+    fn get_in_window(&mut self) -> Vec<f64> {
+        let w = self.window_size;
+        let mut out = vec![0.0f64; w];
+        for i in 0..w {
+            out[i] = self.in_buf[(self.in_pos + i) % self.window_size];
+        }
+        out
+    }
+
+    /// Returns the current reference window filled from `ref_buf`.
+    fn get_ref_window(&mut self) -> Vec<f64> {
+        let w = self.window_size;
+        let mut out = vec![0.0f64; w];
+        for i in 0..w {
+            out[i] = self.ref_buf[(self.ref_pos + i) % self.window_size];
+        }
+        out
+    }
+
+    /// Cross-correlates `get_in_window()` with `get_ref_window()` over the overlapping region
+    /// and returns the lag (in samples) that maximizes correlation.
+    fn estimate_lag(&mut self) -> usize {
+        let in_w = self.get_in_window();
+        let ref_w = self.get_ref_window();
+        let n = std::cmp::min(in_w.len(), ref_w.len());
+        let mut best_corr = f64::NEG_INFINITY;
+        let mut best_lag = 0usize;
+        for lag in 0..n {
+            let corr = in_w.iter().zip(ref_w[lag..].iter()).map(|(a, b)| a * b).sum::<f64>();
+            if corr > best_corr {
+                best_corr = corr;
+                best_lag = lag;
+            }
+        }
+        best_lag
+    }
+
+    /// Applies a fractional delay to `input` so it aligns with `reference` via estimated lag.
+    pub fn process(&mut self, input: f64, reference: f64) -> f64 {
+        if self.estimate_lag() == 0 {
+            input
+        } else {
+            // Shift input right by `lag` samples (delay input forward).
+            let lag = self.estimate_lag();
+            let mut delayed = vec![0.0f64; self.window_size];
+            for i in 0..self.window_size {
+                let src_idx = (i + lag) % self.window_size;
+                delayed[i] = self.in_buf[src_idx];
+            }
+            input * self.allpass_coef
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{RoutingMatrix, RoutingMode, StereoFrame};

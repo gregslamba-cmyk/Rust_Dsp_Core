@@ -9,6 +9,7 @@ pub mod envelope;
 pub mod voice;
 pub mod mpe;
 pub mod engine;
+pub mod wavetable_oscillator;
 
 pub use oscillator::{Oscillator, OscillatorWaveform};
 pub use filter::{MultiModeFilter, FilterMode};
@@ -16,3 +17,4 @@ pub use envelope::{AdsrEnvelope, EnvelopeStage};
 pub use voice::{Voice, VoiceParams};
 pub use mpe::{MpeZone, MpeManager, MpeNoteState, pitch_bend_to_ratio, timbre_to_filter_mod, pressure_to_amp_mod};
 pub use engine::SynthEngine;
+pub use wavetable_oscillator::{WavetableOscillator, WavetableWaveform};

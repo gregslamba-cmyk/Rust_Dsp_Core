@@ -42,3 +42,7 @@ pub use core_dsp_modules::transient_splitter;
 pub use core_dsp_modules::console_mixer;
 pub use core_dsp_modules::transport_timeline;
 pub use core_dsp_modules::disk_streamer;
+
+/// Re-export of all core-dsp modules for convenient `use core_dsp::*;`
+#[allow(unused_imports)]
+pub use core_dsp_modules::*;
