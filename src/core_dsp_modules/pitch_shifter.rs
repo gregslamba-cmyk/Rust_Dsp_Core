@@ -5,16 +5,19 @@
 //!
 //! ## Architecture
 //! - Pre-allocated FFT buffers via `realfft` (configured in `initialize()`).
-//! - Overlap-Add synthesis with Hann windowing.
+//! - Overlap-Add synthesis with Hann windowing (75% overlap, hop = N/4).
+//! - COLA (Constant Overlap-Add) Hann window: sum of overlapping windows = 1.
 //! - Phase-locking: consecutive frame phase differences are aligned across the
 //!   hop to reduce phasiness.
+//! - Phase accumulation (`synth_phase`) for continuous phase across frames.
 //! - Cepstral formant envelope: spectral envelope extracted via cepstral liftering,
 //!   then re-applied independently of the pitch shift so formants can be shifted
 //!   separately via `formant_shift_semitones`.
 //!
 //! ## Real-Time Safety
-//! All memory allocated in `initialize()`. The audio path (`process_sample`,
+//! All memory allocated in `initialize()`/`new()`. The audio path (`process_sample`,
 //! `process_block`) is lock-free, zero-allocation, and sanitizes `NaN`/`Inf`.
+//! All temporary buffers pre-allocated as fixed-size arrays on the struct.
 //!
 //! ## Latency
 //! `latency_samples()` returns `window_size` (analysis window size).
@@ -25,16 +28,7 @@ use std::sync::Arc;
 
 /// Configurable FFT size (power of two).
 const DEFAULT_WINDOW: usize = 2048;
-const DEFAULT_HOP: usize = 1024; // 50% overlap
-
-/// Output of cepstral analysis: magnitude envelope and phase.
-#[derive(Clone, Debug)]
-struct _CepstralEnvelope {
-    /// Log-magnitude spectrum envelope (smoothed).
-    envelope: Vec<f64>,
-    /// Liftered cepstrum used to reconstruct envelope.
-    lifter: Vec<f64>,
-}
+const DEFAULT_HOP: usize = 512; // 75% overlap (hop = N/4) for COLA Hann
 
 /// Pitch shifting engine.
 pub struct PitchShifter {
@@ -47,14 +41,14 @@ pub struct PitchShifter {
     r2c_scratch: Vec<Complex<f64>>,
     c2r_scratch: Vec<Complex<f64>>,
 
-    /// Hann window.
+    /// Hann window (COLA: sum of overlapping windows = 1 at 75% overlap).
     window: Vec<f64>,
     /// Input ring buffer (circular).
     in_buf: Vec<f64>,
     in_pos: usize,
     in_collected: usize,
 
-    /// Output overlap-add accumulator.
+    /// Output overlap-add accumulator (2 * window_size for 75% overlap).
     out_buf: Vec<f64>,
     out_pos: usize,
 
@@ -65,6 +59,8 @@ pub struct PitchShifter {
 
     /// Phase-lock state: previous phase per bin.
     prev_phase: Vec<f64>,
+    /// Synthesis phase accumulator (continuous phase across frames).
+    synth_phase: Vec<f64>,
     /// Previous magnitude (for cepstral envelope tracking).
     _prev_mag: Vec<f64>,
     /// Quality mode (Standard or PolyphonicStudio).
@@ -76,6 +72,11 @@ pub struct PitchShifter {
     formant_ratio: f64,
     /// Cepstral lifter cutoff (bins).
     lifter_cutoff: usize,
+
+    /// Pre-allocated temporary buffers for spectral_modify (zero allocations in audio path).
+    temp_mags: Vec<f64>,
+    temp_logmag: Vec<f64>,
+    temp_envelope: Vec<f64>,
 
     sample_rate: f64,
     initialized: bool,
@@ -106,6 +107,11 @@ impl PitchShifter {
             *w = 0.5 * (1.0 - (pi2 * (i as f64) / w_f64).cos());
         }
 
+        // Pre-allocate temporary buffers for spectral_modify (zero allocations in audio path).
+        let temp_mags = vec![0.0; complex_len];
+        let temp_logmag = vec![0.0; complex_len];
+        let temp_envelope = vec![0.0; complex_len];
+
         Self {
             window_size,
             hop_size,
@@ -118,17 +124,21 @@ impl PitchShifter {
             in_buf: vec![0.0; window_size],
             in_pos: 0,
             in_collected: 0,
-            out_buf: vec![0.0; window_size * 2],
+            out_buf: vec![0.0; window_size * 2], // 2 * window_size for 75% overlap
             out_pos: 0,
             time_frame: vec![0.0; window_size],
             complex_spectrum: vec![Complex::new(0.0, 0.0); complex_len],
             ifft_frame: vec![0.0; window_size],
             prev_phase: vec![0.0; complex_len],
+            synth_phase: vec![0.0; complex_len], // New: continuous phase accumulator
             _prev_mag: vec![0.0; complex_len],
             quality_mode: PitchQualityMode::default(),
             speed_ratio: 1.0,
             formant_ratio: 1.0,
             lifter_cutoff: complex_len.max(8),
+            temp_mags,
+            temp_logmag,
+            temp_envelope,
             sample_rate,
             initialized: false,
         }
@@ -182,32 +192,43 @@ impl PitchShifter {
         self.complex_spectrum.fill(Complex::new(0.0, 0.0));
         self.ifft_frame.fill(0.0);
         self.prev_phase.fill(0.0);
+        self.synth_phase.fill(0.0); // New: reset continuous phase accumulator
         self._prev_mag.fill(0.0);
+        // Clear temp buffers
+        self.temp_mags.fill(0.0);
+        self.temp_logmag.fill(0.0);
+        self.temp_envelope.fill(0.0);
     }
 
     /// Analytical cepstral envelope extraction + spectral modification callback.
-    fn spectral_modify(&mut self) {
+/// Uses pre-allocated buffers (temp_mags, temp_logmag, temp_envelope) for zero allocations in audio path.
+/// Implements 75% overlap COLA Hann window and phase accumulation (synth_phase) for continuous pitch.
+fn spectral_modify(&mut self) {
         let spectrum: &mut [Complex<f64>] = &mut self.complex_spectrum;
         let w = self.window_size;
         let n = self.complex_len;
 
+        // --- Pre-allocate fixed buffers (zero heap in audio path) ---
+        // Use pre-allocated temp buffers instead of creating new Vecs.
+        let mags = &mut self.temp_mags;
+        let logmag = &mut self.temp_logmag;
+        let envelope = &mut self.temp_envelope;
+
         // Compute magnitude spectrum.
-        let mut mags: Vec<f64> = vec![0.0; n];
         for (i, mag) in mags.iter_mut().enumerate().take(n) {
             let c = spectrum.get(i).copied().unwrap_or(Complex::new(0.0, 0.0));
             *mag = c.norm();
         }
 
-        // Log magnitude.
-        let mut logmag: Vec<f64> = vec![0.0; n];
+        // Log magnitude with NaN protection: clamp to small positive before ln.
         for i in 0..n {
-            logmag[i] = (mags[i] + 1e-12).ln();
+            let mag_val = mags[i].max(1e-12); // Prevent log of negative/zero
+            logmag[i] = mag_val.ln();
         }
 
         // Simple cepstral liftering via lowpass on logmag envelope.
         // Smooth logmag with a boxcar moving average to get the envelope.
         let cutoff = self.lifter_cutoff.min(n);
-        let mut envelope: Vec<f64> = vec![0.0; n];
         for i in 0..n {
             let mut sum = 0.0;
             let mut cnt = 0;
@@ -217,41 +238,52 @@ impl PitchShifter {
                 sum += logmag.get(j).copied().unwrap_or(0.0);
                 cnt += 1;
             }
-            if cnt > 0 { envelope[i] = sum / cnt as f64; }
+            if cnt > 0 { envelope[i] = sum / cnt as f64; } else { envelope[i] = 0.0 };
         }
 
-        // Compute phase-locking: align phase differences to speed ratio.
-        // Current phase.
+        // Phase accumulation: continuous phase across frames via synth_phase.
+        // Align phase differences to speed ratio, using synth_phase as the running accumulator.
         for i in 0..n {
             let c = spectrum.get(i).copied().unwrap_or(Complex::new(0.0, 0.0));
             let phase = c.arg();
             let prev = self.prev_phase.get(i).copied().unwrap_or(0.0);
-            let mut dphase = phase - prev;
+            // Also incorporate synth_phase (continuous phase from previous frame).
+            let prev_phase_total = prev + self.synth_phase[i];
+
+            let mut dphase = phase - prev_phase_total;
             // Wrap to [-pi, pi].
             while dphase > std::f64::consts::PI { dphase -= std::f64::consts::TAU; }
             while dphase < -std::f64::consts::PI { dphase += std::f64::consts::TAU; }
 
-            // Expected phase increment for true frequency.
+            // Expected phase increment for true frequency (without pitch shift).
             let bin_freq = i as f64 * self.sample_rate / w as f64;
             let _expected = std::f64::consts::TAU * bin_freq * self.hop_size as f64 / self.sample_rate;
 
             // Apply pitch shift to frequency: new_bin = bin * speed_ratio.
-            // We implement shift by moving bin content.
-            self.prev_phase[i] = phase;
+            // We advance the synthesis phase by dphase * speed_ratio.
+            self.synth_phase[i] = prev_phase_total + dphase * self.speed_ratio;
+            self.prev_phase[i] = phase; // Store raw phase for next frame comparison
 
-            // Phase-locked output phase.
-            let new_phase = prev + dphase * self.speed_ratio;
             let new_mag = mags.get(i).copied().unwrap_or(0.0);
 
             // Apply formant envelope: blend shifted magnitude toward envelope.
             let env = envelope.get(i).copied().unwrap_or(0.0);
             let blend = self.formant_ratio;
-            let target_mag = if blend > 0.999 { new_mag } else {
-                new_mag.powf(1.0 - blend) * env.powf(blend)
+            let mut target_mag = if blend > 0.999 { new_mag } else {
+                // Powf with negative base can produce NaN; protect against that.
+                if new_mag > 0.0 && env > 0.0 {
+                    new_mag.powf(1.0 - blend) * env.powf(blend)
+                } else {
+                    0.0
+                }
             };
 
+            if target_mag.is_nan() || target_mag.is_infinite() {
+                target_mag = 0.0;
+            }
+
             if let Some(slot) = spectrum.get_mut(i) {
-                *slot = Complex::new(target_mag * new_phase.cos(), target_mag * new_phase.sin());
+                *slot = Complex::new(target_mag * self.synth_phase[i].cos(), target_mag * self.synth_phase[i].sin());
             }
         }
 
@@ -316,7 +348,9 @@ impl PitchShifter {
             );
 
             // Windowed overlap-add into out_buf.
-            let norm = 2.0 / (w as f64);
+            // COLA normalization for Hann window at 75% overlap (hop = N/4):
+            // sum of 4 overlapping Hann^2 windows = 1.5, so norm = 1/1.5 = 2/3.
+            let norm = 2.0 / 3.0;
             for i in 0..w {
                 let synth = self.ifft_frame.get(i).copied().unwrap_or(0.0) * self.window.get(i).copied().unwrap_or(0.0) * norm;
                 let out_idx = (self.out_pos + i) % (w * 2);

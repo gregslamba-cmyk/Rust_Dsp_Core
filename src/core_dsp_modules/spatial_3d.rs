@@ -88,35 +88,69 @@ impl SpeakerPosition {
     #[inline] pub fn from_radians(azimuth: f64) -> Self { Self { azimuth, elevation: PI / 2.0 } }
 }
 
-#[derive(Debug, Default)]
+/// Vector Base Amplitude Panning state with fixed-size arrays (no Vec allocations).
+#[derive(Debug)]
 pub struct VbapState {
-    n_speakers: usize, speaker_positions: Vec<SpeakerPosition>, weights: Vec<f64>, accumulated: Vec<f64>,
+    n_speakers: usize,
+    speaker_positions: [SpeakerPosition; 128],
+    weights: [f64; 128],
+    accumulated: [f64; 128],
 }
 
+impl Default for VbapState {
+    fn default() -> Self {
+        Self {
+            n_speakers: 0,
+            speaker_positions: core::array::from_fn(|_| SpeakerPosition { azimuth: 0.0, elevation: 0.0 }),
+            weights: [0.0; 128],
+            accumulated: [0.0; 128],
+        }
+    }
+}
 
 impl VbapState {
     #[inline] pub fn configure(&mut self, positions: &[SpeakerPosition]) -> bool {
-        let n = positions.len(); if n == 0 || n > 128 { return false; }
-        self.n_speakers = n; self.speaker_positions = positions.to_vec();
-        self.weights.resize(n, 0.0); self.accumulated.resize(n, 0.0); true
-    }
-
-    #[inline] pub fn compute_weights(&mut self, _input: &AmbisonicCoefficients, azimuth: f64, _elevation: f64) -> Vec<f64> {
-        let n = self.n_speakers; if n == 0 { return vec![0.0; 1]; }
-        let mut result = Vec::with_capacity(n);
-        for i in 0..n { let sp = &self.speaker_positions[i]; let az_diff = azimuth - sp.azimuth; let angle_weight = az_diff.cos().max(0.0); result.push(if angle_weight > VBAP_EPS { angle_weight } else { 0.0 }); }
-        let sum: f64 = result.iter().sum(); if sum > VBAP_EPS { for w in &mut result { *w /= sum; } } result
-    }
-
-    #[inline] pub fn process_sample(&mut self, _input: f64) -> Vec<f64> {
-        let n = self.n_speakers; if n == 0 { return vec![0.0]; }
-        if self.weights.is_empty() || self.weights.len() != n {
-            let mut uniform_weights = vec![0.0; n]; let step = 2.0 * PI / (n as f64);
-            for i in 0..n { uniform_weights[i] = (i as f64 * step).cos().max(0.0); }
-            let sum: f64 = uniform_weights.iter().sum(); if sum > VBAP_EPS { for w in &mut uniform_weights { *w /= sum; } }
-            self.accumulated = uniform_weights.clone(); return uniform_weights;
+        let n = positions.len();
+        if n == 0 || n > 128 { return false; }
+        self.n_speakers = n;
+        for (i, p) in positions.iter().enumerate() {
+            self.speaker_positions[i] = *p;
         }
-        let mut acc = Vec::with_capacity(n); for i in 0..n { acc.push(self.weights[i].max(0.0)); } acc
+        for i in 0..n { self.weights[i] = 0.0; self.accumulated[i] = 0.0; }
+        true
+    }
+
+    #[inline] pub fn compute_weights(&mut self, _input: &AmbisonicCoefficients, azimuth: f64, _elevation: f64) -> [f64; 128] {
+        let n = self.n_speakers;
+        let mut result = [0.0; 128];
+        for i in 0..n {
+            let sp = &self.speaker_positions[i];
+            let az_diff = azimuth - sp.azimuth;
+            let angle_weight = az_diff.cos().max(0.0);
+            result[i] = if angle_weight > VBAP_EPS { angle_weight } else { 0.0 };
+        }
+        let sum: f64 = result.iter().take(n).sum();
+        if sum > VBAP_EPS {
+            for w in result.iter_mut().take(n) { *w /= sum; }
+        }
+        result
+    }
+
+    #[inline] pub fn process_sample(&mut self, _input: f64) -> [f64; 128] {
+        let n = self.n_speakers;
+        if n == 0 { return [0.0; 128]; }
+        if self.weights.iter().take(n).any(|&w| w == 0.0) {
+            let mut uniform_weights = [0.0; 128];
+            let step = 2.0 * PI / (n as f64);
+            for i in 0..n { uniform_weights[i] = (i as f64 * step).cos().max(0.0); }
+            let sum: f64 = uniform_weights.iter().take(n).sum();
+            if sum > VBAP_EPS { for w in uniform_weights.iter_mut().take(n) { *w /= sum; } }
+            self.accumulated[..n].copy_from_slice(&uniform_weights[..n]);
+            return uniform_weights;
+        }
+        let mut acc = [0.0; 128];
+        for i in 0..n { acc[i] = self.weights[i].max(0.0); }
+        acc
     }
 }
 #[derive(Clone, Copy, Debug, Default)]
@@ -138,51 +172,145 @@ pub struct Spatial3d {
     vbap: VbapState,
     current_hrtf: HrtfCoefficients,
     sample_count: u64,
+    /// ITD fractional delay lines (left and right) for interaural time difference.
+    itd_delay_l: Vec<f64>,
+    itd_delay_r: Vec<f64>,
+    itd_write_pos: usize,
+    itd_max_samples: usize,
 }
 
 impl Default for Spatial3d {
-    fn default() -> Self { Self { config: Spatial3dConfig::new(44100.0, true), vbap: VbapState::default(), current_hrtf: HrtfCoefficients::default(), sample_count: 0 } }
+    fn default() -> Self {
+        Self {
+            config: Spatial3dConfig::new(44100.0, true),
+            vbap: VbapState::default(),
+            current_hrtf: HrtfCoefficients::default(),
+            sample_count: 0,
+            itd_delay_l: Vec::new(),
+            itd_delay_r: Vec::new(),
+            itd_write_pos: 0,
+            itd_max_samples: 1,
+        }
+    }
 }
 
 impl Spatial3d {
     #[inline] pub fn initialize(&mut self, sample_rate: f64, config: Spatial3dConfig, speaker_positions: &[SpeakerPosition]) -> bool {
         self.config = if sample_rate > 0.0 && sample_rate.is_finite() { Spatial3dConfig::with_gain(sample_rate, config.binaural, config.global_gain) } else { Spatial3dConfig::new(44100.0, config.binaural) };
-        self.vbap.configure(speaker_positions); self.current_hrtf = HrtfCoefficients::default(); self.sample_count = 0; true
+        self.vbap.configure(speaker_positions);
+        self.current_hrtf = HrtfCoefficients::default();
+        self.sample_count = 0;
+        // Allocate ITD delay lines: max ITD ~ 0.7ms * 192kHz = ~134 samples, round up.
+        let sr = self.config.sample_rate;
+        self.itd_max_samples = ((0.001 * sr).ceil() as usize).max(2).next_power_of_two();
+        self.itd_delay_l = vec![0.0; self.itd_max_samples];
+        self.itd_delay_r = vec![0.0; self.itd_max_samples];
+        self.itd_write_pos = 0;
+        true
     }
 
-    #[inline] pub fn reset(&mut self) { self.sample_count = 0; self.current_hrtf = HrtfCoefficients::default(); }
+    #[inline] pub fn reset(&mut self) {
+        self.sample_count = 0;
+        self.current_hrtf = HrtfCoefficients::default();
+        if !self.itd_delay_l.is_empty() {
+            self.itd_delay_l.fill(0.0);
+            self.itd_delay_r.fill(0.0);
+            self.itd_write_pos = 0;
+        }
+    }
+
+    /// Apply ITD fractional delay using linear interpolation.
+    #[inline]
+    fn apply_itd(&mut self, left: f64, right: f64, itd_sec: f64) -> (f64, f64) {
+        if self.itd_delay_l.is_empty() || itd_sec.abs() < 1e-9 {
+            if !self.itd_delay_l.is_empty() {
+                self.itd_delay_l[self.itd_write_pos] = left;
+                self.itd_delay_r[self.itd_write_pos] = right;
+                self.itd_write_pos = (self.itd_write_pos + 1) % self.itd_max_samples;
+            }
+            return (left, right);
+        }
+        let sr = self.config.sample_rate;
+        let delay_samples_l = if itd_sec < 0.0 { (-itd_sec * sr).clamp(0.0, (self.itd_max_samples - 2) as f64) } else { 0.0 };
+        let delay_samples_r = if itd_sec > 0.0 { (itd_sec * sr).clamp(0.0, (self.itd_max_samples - 2) as f64) } else { 0.0 };
+
+        self.itd_delay_l[self.itd_write_pos] = left;
+        self.itd_delay_r[self.itd_write_pos] = right;
+
+        let read_l = self.read_itd(&self.itd_delay_l, delay_samples_l);
+        let read_r = self.read_itd(&self.itd_delay_r, delay_samples_r);
+
+        self.itd_write_pos = (self.itd_write_pos + 1) % self.itd_max_samples;
+        (read_l, read_r)
+    }
+
+    #[inline]
+    fn read_itd(&self, buf: &[f64], delay_samples: f64) -> f64 {
+        let n = buf.len();
+        if n < 2 { return 0.0; }
+        let read_pos = (self.itd_write_pos as f64 + n as f64 - delay_samples) % n as f64;
+        let idx0 = read_pos.floor() as usize % n;
+        let idx1 = (idx0 + 1) % n;
+        let frac = read_pos - read_pos.floor();
+        buf[idx0] * (1.0 - frac) + buf[idx1] * frac
+    }
 
     #[inline] pub fn process_sample(&mut self, input: f64, azimuth: f64, elevation: f64) -> (f64, f64) {
-        let clean_input = if input.is_finite() { input } else { 0.0 }; if clean_input == 0.0 { self.sample_count = self.sample_count.saturating_add(1); return (0.0, 0.0); }
-        self.sample_count = self.sample_count.saturating_add(1); self.current_hrtf = hrtf_for_direction(azimuth, elevation);
+        let clean_input = if input.is_finite() { input } else { 0.0 };
+        self.sample_count = self.sample_count.saturating_add(1);
+
+        // Fix azimuth sign: wrap to [-PI, PI] range.
+        let az = if azimuth > PI { azimuth - 2.0 * PI } else if azimuth < -PI { azimuth + 2.0 * PI } else { azimuth };
+        self.current_hrtf = hrtf_for_direction(az, elevation);
+
         if self.config.binaural {
-            let left_hrtf = self.current_hrtf.left_gain; let right_hrtf = self.current_hrtf.right_gain; let ild_factor = 10.0_f64.powf(self.current_hrtf.ild_db / 20.0);
-            let left = clean_input * left_hrtf; let right = clean_input * right_hrtf * ild_factor;
-            let sum = left.abs() + right.abs(); if sum > 1.0 { let scale = 1.0 / sum; (left * scale, right * scale) } else { (left, right) }
+            let left_hrtf = self.current_hrtf.left_gain;
+            let right_hrtf = self.current_hrtf.right_gain;
+            let ild_factor = 10.0_f64.powf(self.current_hrtf.ild_db / 20.0);
+            let left = clean_input * left_hrtf;
+            let right = clean_input * right_hrtf * ild_factor;
+
+            // Apply ITD fractional delay instead of max(|L|,|R|) normalization.
+            let (out_l, out_r) = self.apply_itd(left, right, self.current_hrtf.itd_sec);
+
+            // Gentle soft-limit only if exceeding 1.0 (tanh saturation, not hard clip).
+            let out_l = if out_l.abs() > 1.0 { out_l.tanh() } else { out_l };
+            let out_r = if out_r.abs() > 1.0 { out_r.tanh() } else { out_r };
+            (out_l, out_r)
         } else {
-            let _weights = self.vbap.process_sample(clean_input); let pan_left = 0.5; let pan_right = 0.5;
-            let left = clean_input * pan_left * self.config.global_gain; let right = clean_input * pan_right * self.config.global_gain;
-            let max_out = left.abs().max(right.abs()).max(1e-6); (left / max_out, right / max_out)
+            let _weights = self.vbap.process_sample(clean_input);
+            let pan_left = 0.5;
+            let pan_right = 0.5;
+            let left = clean_input * pan_left * self.config.global_gain;
+            let right = clean_input * pan_right * self.config.global_gain;
+            (left, right)
         }
     }
 
     #[inline] pub fn process_stereo(&mut self, left: f64, right: f64, azimuth: f64, elevation: f64) -> (f64, f64) {
-        let l = if left.is_finite() { left } else { 0.0 }; let r = if right.is_finite() { right } else { 0.0 }; if l == 0.0 && r == 0.0 { return (0.0, 0.0); }
+        let l = if left.is_finite() { left } else { 0.0 };
+        let r = if right.is_finite() { right } else { 0.0 };
         let (out_l, out_r) = self.process_sample(0.5 * (l + r), azimuth, elevation);
-        let diff_weight = 0.3; let final_l = out_l + (l - r) * diff_weight * 0.5; let final_r = out_r - (l - r) * diff_weight * 0.5;
-        let out_l = if final_l.is_finite() { final_l } else { 0.0 }; let out_r = if final_r.is_finite() { final_r } else { 0.0 };
-        let max_val = out_l.abs().max(out_r.abs()).max(1e-6); (out_l / max_val, out_r / max_val)
+        let diff_weight = 0.3;
+        let final_l = out_l + (l - r) * diff_weight * 0.5;
+        let final_r = out_r - (l - r) * diff_weight * 0.5;
+        let out_l = if final_l.is_finite() { final_l } else { 0.0 };
+        let out_r = if final_r.is_finite() { final_r } else { 0.0 };
+        (out_l, out_r)
     }
 
     #[inline] pub fn process_ambisonic(&mut self, ambi: &AmbisonicCoefficients, azimuth: f64, elevation: f64) -> (f64, f64) {
         let (base_l, base_r) = ambi.to_stereo(azimuth, elevation);
         if self.config.binaural {
-            let hrtf_l = self.current_hrtf.left_gain; let hrtf_r = self.current_hrtf.right_gain;
-            let out_l = base_l * hrtf_l; let out_r = base_r * hrtf_r;
-            let max_val = out_l.abs().max(out_r.abs()).max(1e-6); (out_l / max_val, out_r / max_val)
+            let hrtf_l = self.current_hrtf.left_gain;
+            let hrtf_r = self.current_hrtf.right_gain;
+            let out_l = base_l * hrtf_l;
+            let out_r = base_r * hrtf_r;
+            (out_l, out_r)
         } else {
-            let out_l = base_l * self.config.global_gain; let out_r = base_r * self.config.global_gain;
-            let max_val = out_l.abs().max(out_r.abs()).max(1e-6); (out_l / max_val, out_r / max_val)
+            let out_l = base_l * self.config.global_gain;
+            let out_r = base_r * self.config.global_gain;
+            (out_l, out_r)
         }
     }
 

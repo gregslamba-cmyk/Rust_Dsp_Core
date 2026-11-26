@@ -52,6 +52,8 @@ impl Default for RoomConfig {
 struct DiffusionAllPass {
     delay: DelayLine,
     coeff: f64,
+    /// Feedback state for closing the loop.
+    fb_state: f64,
 }
 
 impl DiffusionAllPass {
@@ -60,6 +62,7 @@ impl DiffusionAllPass {
         Self {
             delay: DelayLine::new(max_len, sample_rate),
             coeff: 0.7,
+            fb_state: 0.0,
         }
     }
 
@@ -67,13 +70,16 @@ impl DiffusionAllPass {
     fn process(&mut self, input: f64, delay_sec: f64) -> f64 {
         let x = if input.is_finite() { input } else { 0.0 };
         // All-pass: y[n] = -coeff * x[n] + x[n-d] + coeff * y[n-d]
-        let delayed = self.delay.process_sample(x, delay_sec);
-        let out = -self.coeff * x + delayed + self.coeff * delayed;
+        // Single call to delay line, capturing both input write and delayed read.
+        let delayed = self.delay.process_sample(x + self.coeff * self.fb_state, delay_sec);
+        let out = -self.coeff * x + delayed + self.coeff * self.fb_state;
+        self.fb_state = flush_denormal(delayed); // Close the feedback loop
         flush_denormal(out)
     }
 
     fn reset(&mut self) {
         self.delay.reset();
+        self.fb_state = 0.0;
     }
 }
 
@@ -111,13 +117,13 @@ impl DiffusionNetwork {
     #[inline]
     fn process(&mut self, input: f64) -> f64 {
         let mut x = if input.is_finite() { input } else { 0.0 };
-        // Nested all-passes
+        // Nested all-passes (each calls delay line once with feedback)
         x = self.aps[0].process(x, 0.002);
         x = self.aps[1].process(x, 0.003);
         x = self.aps[2].process(x, 0.004);
         x = self.aps[3].process(x, 0.005);
 
-        // Feedback delay
+        // Feedback delay (single call)
         let fb = self.fb_delay.process_sample(x, 0.05);
         let out = x + self.fb_gain * fb;
         flush_denormal(out)
@@ -291,18 +297,18 @@ impl AcousticRoom {
     #[inline]
     pub fn process_mono(&mut self, input: f64) -> (f64, f64) {
         let x = if input.is_finite() { input } else { 0.0 };
-        if x == 0.0 {
-            return (0.0, 0.0);
-        }
 
         // Early reflections: true per-image delayed taps.
+        // Avoid double write on same DelayLine: write once, read twice with different delays.
         let mut early_l = 0.0;
         let mut early_r = 0.0;
         for i in 0..self.image_count {
             let img_l = self.images_l[i];
             let img_r = self.images_r[i];
+            // Write input once, get delayed output for L channel
             let tap_l = self.early_delay_lines[i].process_sample(x, img_l.delay);
-            let tap_r = self.early_delay_lines[i].process_sample(x, img_r.delay);
+            // Read R channel tap without writing (uses read_sample to avoid overwriting buffer)
+            let tap_r = self.early_delay_lines[i].read_sample(img_r.delay);
             early_l += img_l.gain * tap_l;
             early_r += img_r.gain * tap_r;
         }
@@ -323,20 +329,26 @@ impl AcousticRoom {
         let l = if left.is_finite() { left } else { 0.0 };
         let r = if right.is_finite() { right } else { 0.0 };
 
-        if l == 0.0 && r == 0.0 {
-            return (0.0, 0.0);
-        }
-
         // Early reflections: per-image delayed taps for each channel.
+        // Avoid double write on same DelayLine: write once per channel, read twice with different delays.
         let mut early_l = 0.0;
         let mut early_r = 0.0;
         for i in 0..self.image_count {
             let img_l = self.images_l[i];
             let img_r = self.images_r[i];
-            let tap_l = self.early_delay_lines[i].process_sample(l, img_l.delay);
-            let tap_r = self.early_delay_lines[i].process_sample(r, img_r.delay);
-            early_l += img_l.gain * tap_l;
-            early_r += img_r.gain * tap_r;
+            // Write L channel, get L tap
+            let tap_ll = self.early_delay_lines[i].process_sample(l, img_l.delay);
+            // Read R tap without writing
+            let tap_lr = self.early_delay_lines[i].read_sample(img_r.delay);
+            early_l += img_l.gain * tap_ll;
+            early_r += img_r.gain * tap_lr;
+
+            // Write R channel, get R tap
+            let tap_rr = self.early_delay_lines[i].process_sample(r, img_r.delay);
+            // Read L tap without writing
+            let tap_rl = self.early_delay_lines[i].read_sample(img_l.delay);
+            early_l += img_l.gain * tap_rl;
+            early_r += img_r.gain * tap_rr;
         }
 
         // Late diffusion

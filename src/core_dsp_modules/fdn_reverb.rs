@@ -73,10 +73,6 @@ impl FdnReverb {
     /// Returns (left, right) output pair.
     #[inline]
     pub fn process_sample(&mut self, input: f64) -> (f64, f64) {
-        // Silence fast-path: if input is zero and internal state has decayed, skip computation
-        if input == 0.0 && self.mix_buffer.iter().all(|&b| b.abs() < 1.0e-20) && self.damping_states.iter().all(|&s| s.abs() < 1.0e-20) {
-            return (0.0, 0.0);
-        }
         let clean_in = if input.is_finite() { input } else { 0.0 };
         // Apply velvet-noise input diffusion (all-pass cascade).
         let diffuse = self.velvet_diffuser.process_stage(0, clean_in) * 0.7
@@ -123,6 +119,9 @@ impl FdnReverb {
             step *= 2;
         }
 
+        // Hadamard normalization: 1/sqrt(N) for energy preservation.
+        let hadamard_norm = 1.0 / (mix_n as f64).sqrt();
+
         // 3. Stereo output: sum even/odd channels for L/R
         let mut left = 0.0;
         let mut right = 0.0;
@@ -134,10 +133,8 @@ impl FdnReverb {
             }
         }
 
-        // Normalize
-        let norm = 1.0 / (mix_n as f64).sqrt();
-        left *= norm;
-        right *= norm;
+        left *= hadamard_norm;
+        right *= hadamard_norm;
 
         // Sanitize
         if !left.is_finite() {
