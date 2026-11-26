@@ -311,6 +311,26 @@ mod tests {
     }
 
     #[test]
+    fn oversampler_unity_gain_preserves_input() {
+        for factor in [
+            OversamplingFactor::X1,
+            OversamplingFactor::X2,
+            OversamplingFactor::X4,
+            OversamplingFactor::X8,
+        ] {
+            let mut os = Oversampler::<f64>::default();
+            let input = if factor == OversamplingFactor::X1 { 0.001 } else { 0.0 };
+            let output = os.process(input, factor, |sample| sample);
+            let expected = input;
+            assert!(
+                ((output - expected).abs() <= 1e-6 * (1.0 + input.abs())),
+                "factor {:?} should preserve unity gain",
+                factor
+            );
+        }
+    }
+
+    #[test]
     fn higher_oversampling_reduces_folded_third_harmonic() {
         fn alias_amplitude(factor: OversamplingFactor) -> f64 {
             let mut oversampler = Oversampler::<f64>::default();

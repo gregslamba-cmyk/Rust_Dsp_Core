@@ -5,6 +5,21 @@ use std::f64::consts::PI;
 /// Maximum number of channels supported by the summing bus.
 pub const MAX_SUMMER_CHANNELS: usize = 128;
 
+/// The valid range for `crosstalk_db` is [-90.0, -20.0] dB.
+/// -90 dB = off/silenzio (exact zero crosstalk).
+/// -20 dB = max crosstalk (atten = 0.1).
+/// Default analogico: -65 dB (atten ≈ 0.00056).
+/// More negative = less crosstalk.
+fn db_to_atten(db: f64) -> f64 {
+    // Clamp to valid range then convert dB to linear attenuation
+    let clamped = db.max(-90.0).min(-20.0);
+    if clamped <= -90.0 {
+        0.0
+    } else {
+        10.0f64.powf(clamped / 20.0)
+    }
+}
+
 /// Adjacent‑channel crosstalk matrix with one‑pole high‑pass coupling.
 pub struct AdjacentCrosstalkMatrix {
     crosstalk_db: f64,
@@ -19,11 +34,16 @@ impl AdjacentCrosstalkMatrix {
         let sr = if sample_rate > 0.0 { sample_rate } else { 48_000.0 };
         let omega = 2.0 * PI * 20.0 / sr;
         let alpha = 1.0 - (-omega).exp();
-        let atten = 10.0f64.powf(-crosstalk_db / 20.0);
+        // Convert crosstalk_db from dB to linear attenuation.
+        // Valid range: -90 dB (off/silenzio) to -20 dB (max crosstalk).
+        // Default analogico: -65 dB. More negative = less crosstalk.
+        let atten = db_to_atten(crosstalk_db);
+        // coupling_alpha scales the previous-state feedback, modulated by atten.
+        let coupling_alpha = alpha * atten;
         Self {
             crosstalk_db,
             sample_rate: sr,
-            coupling_alpha: if crosstalk_db <= 0.0 { 0.0 } else { alpha *atten },
+            coupling_alpha,
             previous: vec![0.0; MAX_SUMMER_CHANNELS],
             num_channels: 2,
         }
@@ -33,14 +53,14 @@ impl AdjacentCrosstalkMatrix {
         self.crosstalk_db = db;
         let omega = 2.0 * PI * 20.0 / self.sample_rate.max(1.0);
         let alpha = 1.0 - (-omega).exp();
-        self.coupling_alpha = if db <= 0.0 { 0.0 } else { alpha * 10.0f64.powf(-db / 20.0) };
+        self.coupling_alpha = alpha * db_to_atten(db);
     }
 
     pub fn initialize(&mut self, sample_rate: f64) {
         self.sample_rate = if sample_rate > 0.0 { sample_rate } else { 48_000.0 };
         let omega = 2.0 * PI * 20.0 / self.sample_rate.max(1.0);
         let alpha = 1.0 - (-omega).exp();
-        self.coupling_alpha = if self.crosstalk_db <= 0.0 { 0.0 } else { alpha * 10.0f64.powf(-self.crosstalk_db / 20.0) };
+        self.coupling_alpha = alpha * db_to_atten(self.crosstalk_db);
     }
 
     pub fn reset(&mut self) {
@@ -83,7 +103,7 @@ impl AdjacentCrosstalkMatrix {
             .min(num_samples);
         let mut x: [f64; MAX_SUMMER_CHANNELS] = [0.0; MAX_SUMMER_CHANNELS];
         let mut y: [f64; MAX_SUMMER_CHANNELS] = [0.0; MAX_SUMMER_CHANNELS];
-        let atten = if self.crosstalk_db <= 0.0 { 0.0 } else { 10.0f64.powf(-self.crosstalk_db / 20.0) };
+        let atten = db_to_atten(self.crosstalk_db);
         for k in 0..len {
             for i in 0..nch {
                 let cur = channels.get(i).and_then(|c| c.get(k)).copied().unwrap_or(0.0);
@@ -199,7 +219,8 @@ mod tests {
 
     #[test]
     fn crosstalk_matrix_off_by_default() {
-        let mut m = AdjacentCrosstalkMatrix::new(0.0, 48_000.0);
+        // -90 dB = off/silenzio per la nuova scala dB realistica.
+        let mut m = AdjacentCrosstalkMatrix::new(-90.0, 48_000.0);
         let mut ch0 = vec![0.5_f64; 64];
         let mut ch1 = vec![0.5_f64; 64];
         let mut ch2 = vec![0.5_f64; 64];
@@ -212,7 +233,8 @@ mod tests {
 
     #[test]
     fn crosstalk_matrix_reduces_adjacent_channel() {
-        let mut m = AdjacentCrosstalkMatrix::new(20.0, 48_000.0);
+        // -20 dB = crosstalk massimo (atten = 0.1).
+        let mut m = AdjacentCrosstalkMatrix::new(-20.0, 48_000.0);
         let mut ch0 = vec![0.0_f64; 64];
         let mut ch1 = vec![1.0_f64; 64];
         let mut ch2 = vec![0.0_f64; 64];
@@ -264,5 +286,33 @@ mod tests {
         summer.process_sum(&[(&left_in, &right_in)], &mut out_l, &mut out_r, 64);
         for v in &out_l { assert_eq!(*v, 0.0); }
         for v in &out_r { assert_eq!(*v, 0.0); }
+    }
+
+    #[test]
+    fn adjacent_crosstalk_lfe_isolated_in_5_1_and_7_1() {
+        // Verify LFE (index 3) receives no crosstalk from neighbors it is not adjacent to.
+        let mut m = AdjacentCrosstalkMatrix::new(-65.0, 48_000.0);
+        let mut ch0 = vec![0.5_f64; 64]; // L
+        let mut ch1 = vec![0.0_f64; 64]; // R
+        let mut ch2 = vec![0.0_f64; 64]; // C
+        let mut ch3 = vec![0.0_f64; 64]; // LFE
+        let mut ch4 = vec![0.0_f64; 64]; // Ls
+        let mut ch5 = vec![0.0_f64; 64]; // Rs
+        let mut channels: Vec<&mut [f64]> = vec![&mut ch0, &mut ch1, &mut ch2, &mut ch3, &mut ch4, &mut ch5];
+        m.set_num_channels(6);
+        m.initialize(48_000.0);
+        m.process(&mut channels, 64);
+        // Signal on L (index 0) must NOT bleed into LFE (index 3) since they're not adjacent indices.
+        assert!((channels[3][0] - 0.0).abs() < 1e-9, "LFE must not receive crosstalk from non-adjacent channels");
+        // L (index 0) keeps its own signal.
+        assert!((channels[0][0] - 0.5).abs() < 1e-3);
+        // R (index 1) may get tiny bleed from L at -65 dB ≈ 0.00056, but stays very small.
+        assert!(channels[1][0].abs() < 0.001);
+        // All channels stay finite.
+        for ch in channels.iter() {
+            for s in ch.iter().take(64) {
+                assert!(s.is_finite());
+            }
+        }
     }
 }

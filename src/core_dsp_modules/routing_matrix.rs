@@ -17,6 +17,106 @@
 
 use num_traits::Float;
 
+/// Physical channel format / layout used by a plugin track.
+///
+/// Each variant maps to a specific physical channel count, with `Custom(usize)`
+/// reserved for non-standard user-defined layouts. The `channels()` method
+/// returns the total physical channel count for the format.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChannelFormat {
+    /// Mono (1 channel).
+    Mono = 1,
+    /// Stereo L/R (2 channels).
+    #[default]
+    Stereo = 2,
+    /// LCR: Left, Center, Right (3 channels).
+    Lcr = 3,
+    /// Quad: L, R, Ls, Rs (4 channels).
+    Quad = 4,
+    /// Surround 5.1 (6 channels): L, R, C, LFE, Ls, Rs.
+    Surround51 = 6,
+    /// Surround 7.1 (8 channels): L, R, C, LFE, Ls, Rs, Lrs, Rrs.
+    Surround71 = 8,
+}
+
+impl ChannelFormat {
+    /// Total number of physical channels for this format.
+    pub fn channels(self) -> usize {
+        self as usize
+    }
+}
+
+/// Logical track specification grouping physical channels that share
+/// a common detector link and analog character, while keeping per-channel
+/// DSP state (transformers, variance, etc.) independent.
+///
+/// `adjacent_pairs()` returns the list of physically adjacent channel index
+/// pairs (within the track's physical offset) used by `AdjacentCrosstalkMatrix`
+/// and by linked dynamics. The LFE channel (index 3 in 5.1/7.1) is always
+/// excluded from crosstalk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrackSpec {
+    /// The physical channel format (Mono, Stereo, LCR, Quad, 5.1, 7.1).
+    pub format: ChannelFormat,
+    /// Index of the first physical channel of this track within the overall
+    /// channel array (e.g. track 2 of a stereo pair has offset 2).
+    pub channel_offset: usize,
+}
+
+impl TrackSpec {
+    /// Create a new track spec.
+    pub const fn new(format: ChannelFormat, channel_offset: usize) -> Self {
+        Self { format, channel_offset }
+    }
+
+    /// Total channels occupied by this track.
+    pub const fn channel_count(&self) -> usize {
+        match self.format {
+            ChannelFormat::Mono => 1,
+            ChannelFormat::Stereo => 2,
+            ChannelFormat::Lcr => 3,
+            ChannelFormat::Quad => 4,
+            ChannelFormat::Surround51 => 6,
+            ChannelFormat::Surround71 => 8,
+        }
+    }
+
+    /// Return the list of physically adjacent channel pairs for this track's
+    /// format. Each pair is `(lower_index, higher_index)` in absolute channel
+    /// numbering (offset added). LFE channel (index 3 in 5.1/7.1) is excluded.
+    ///
+    /// Mappings per the Analog-Vibe topology rule:
+    /// - Mono: no adjacent pairs.
+    /// - Stereo: 0 <-> 1.
+    /// - LCR: 0 <-> 2 <-> 1.
+    /// - Quad: 0 <-> 1, 2 <-> 3.
+    /// - 5.1 (6ch SMPTE): L(0)<->R(1), L(0)<->C(2)<->R(1), Ls(4)<->Rs(5); LFE(3) isolated.
+    /// - 7.1 (8ch SMPTE): L(0)<->R(1), Ls(4)<->Rs(5), Lrs(6)<->Rrs(7); LFE(3) isolated.
+    pub fn adjacent_pairs(&self) -> [(usize, usize); 4] {
+        let off = self.channel_offset;
+        match self.format {
+            ChannelFormat::Mono => [(usize::MAX, usize::MAX); 4],
+            ChannelFormat::Stereo => [(off, off + 1), (usize::MAX, usize::MAX), (usize::MAX, usize::MAX), (usize::MAX, usize::MAX)],
+            ChannelFormat::Lcr => [(off, off + 2), (off + 2, off + 1), (usize::MAX, usize::MAX), (usize::MAX, usize::MAX)],
+            ChannelFormat::Quad => [(off, off + 1), (off + 2, off + 3), (usize::MAX, usize::MAX), (usize::MAX, usize::MAX)],
+            ChannelFormat::Surround51 => {
+                // SMPTE 5.1: 0=L, 1=R, 2=C, 3=LFE(isolated), 4=Ls, 5=Rs
+                [(off, off + 1), (off, off + 2), (off + 2, off + 1), (off + 4, off + 5)]
+            }
+            ChannelFormat::Surround71 => {
+                // SMPTE 7.1: 0=L, 1=R, 2=C, 3=LFE(isolated), 4=Ls, 5=Rs, 6=Lrs, 7=Rrs
+                [(off, off + 1), (off + 4, off + 5), (off + 6, off + 7), (usize::MAX, usize::MAX)]
+            }
+        }
+    }
+}
+
+impl Default for TrackSpec {
+    fn default() -> Self {
+        Self::new(ChannelFormat::Stereo, 0)
+    }
+}
+
 /// Modalità di instradamento audio per canale e campo stereo.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RoutingMode {
@@ -299,6 +399,48 @@ mod tests {
         for (actual, expected) in channels.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1.0e-6);
         }
+    }
+
+    #[test]
+    fn track_spec_adjacent_pairs_cover_surround_topology() {
+        use super::{ChannelFormat, TrackSpec};
+        // Physical channel counts.
+        assert_eq!(ChannelFormat::Mono.channels(), 1);
+        assert_eq!(ChannelFormat::Stereo.channels(), 2);
+        assert_eq!(ChannelFormat::Lcr.channels(), 3);
+        assert_eq!(ChannelFormat::Quad.channels(), 4);
+        assert_eq!(ChannelFormat::Surround51.channels(), 6);
+        assert_eq!(ChannelFormat::Surround71.channels(), 8);
+
+        // Adjacent pair topology per format (LFE index 3 excluded everywhere).
+        assert_eq!(
+            TrackSpec::new(ChannelFormat::Mono, 0).adjacent_pairs(),
+            [(usize::MAX, usize::MAX); 4]
+        );
+        assert_eq!(
+            TrackSpec::new(ChannelFormat::Stereo, 0).adjacent_pairs(),
+            [(0usize, 1usize), (usize::MAX, usize::MAX), (usize::MAX, usize::MAX), (usize::MAX, usize::MAX)]
+        );
+        assert_eq!(
+            TrackSpec::new(ChannelFormat::Lcr, 0).adjacent_pairs(),
+            [(0usize, 2usize), (2usize, 1usize), (usize::MAX, usize::MAX), (usize::MAX, usize::MAX)]
+        );
+        assert_eq!(
+            TrackSpec::new(ChannelFormat::Quad, 0).adjacent_pairs(),
+            [(0usize, 1usize), (2usize, 3usize), (usize::MAX, usize::MAX), (usize::MAX, usize::MAX)]
+        );
+        // 5.1 SMPTE: L(0)<->R(1), L(0)<->C(2)<->R(1), Ls(4)<->Rs(5); LFE(3) isolated.
+        let surround51 = TrackSpec::new(ChannelFormat::Surround51, 0).adjacent_pairs();
+        assert_eq!(surround51, [(0usize, 1usize), (0usize, 2usize), (2usize, 1usize), (4usize, 5usize)]);
+        assert!(!surround51.iter().any(|&(a, b)| a == 3 || b == 3), "LFE must not appear in any 5.1 pair");
+        // 7.1 SMPTE: L(0)<->R(1), Ls(4)<->Rs(5), Lrs(6)<->Rrs(7); LFE(3) isolated.
+        let surround71 = TrackSpec::new(ChannelFormat::Surround71, 0).adjacent_pairs();
+        assert_eq!(surround71, [(0usize, 1usize), (4usize, 5usize), (6usize, 7usize), (usize::MAX, usize::MAX)]);
+        assert!(!surround71.iter().any(|&(a, b)| a == 3 || b == 3), "LFE must not appear in any 7.1 pair");
+
+        // Offset is applied to every real pair.
+        let offset = TrackSpec::new(ChannelFormat::Stereo, 2).adjacent_pairs();
+        assert_eq!(offset[0], (2usize, 3usize));
     }
 
     use super::{decode_mid_side_channels, route_channels};

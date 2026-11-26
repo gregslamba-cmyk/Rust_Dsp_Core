@@ -88,7 +88,7 @@ impl CabinetResonance {
             return;
         }
         let bw = freq_hz / q.max(0.1);
-        let c = (std::f64::consts::TAU * bw / sr).tan();
+        let c = (std::f64::consts::PI * bw / sr).tan();
         self.alpha = c / (1.0 + c);
         self.reset();
     }
@@ -129,7 +129,7 @@ impl HeadBumpShelf {
             return;
         }
         let g = (10.0_f64.powf(gain_db / 20.0) - 1.0).clamp(-0.99, 5.0);
-        let c = (std::f64::consts::TAU * cutoff_hz / sr).tan();
+        let c = (std::f64::consts::PI * cutoff_hz / sr).tan();
         self.alpha = (c / (1.0 + c)) * g.clamp(-1.0, 1.0);
         self.reset();
     }

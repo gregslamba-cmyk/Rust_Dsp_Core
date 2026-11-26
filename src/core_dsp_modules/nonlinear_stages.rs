@@ -102,12 +102,16 @@ impl MillerRollOff {
 
         let ch = channel.min(7);
         let drive = drive.max(1.0);
-        // Corner frequency: starts at ~0.49 * sr (near Nyquist) at drive=1.0,
-        // descends to ~8 kHz at high drive. Empirical mapping.
-        let base_corner_hz = self.sample_rate * 0.49;
+        // Corner frequency mapping:
+        // - At drive = 1.0 (unity): corner ≈ Nyquist (sr/2), no audible effect.
+        // - As drive increases, corner descends smoothly toward ~8 kHz at max drive.
+        // - Uses a smooth rational mapping: corner = min + (max - min) / (1 + (drive-1)*k)
+        //   where k controls the descent rate. At drive→∞, corner → min_corner_hz.
+        let max_corner_hz = self.sample_rate * 0.5; // Nyquist
         let min_corner_hz = 8_000.0;
-        let corner_hz = (base_corner_hz - min_corner_hz).max(min_corner_hz)
-            / (drive - 1.0).max(0.01).ln().max(1.0).min(10.0);
+        let k = 0.35; // Empirically tuned for smooth musical descent
+        let corner_hz = min_corner_hz + (max_corner_hz - min_corner_hz) / (1.0 + (drive - 1.0) * k);
+        let corner_hz = corner_hz.clamp(min_corner_hz, max_corner_hz);
 
         // Single-pole IIR (TPT / bilinear transform for stability).
         // Uses PI (not TAU) so fc is the true -3 dB corner in Hz.
