@@ -167,15 +167,25 @@ impl ZdfSvf {
             return 0.0;
         }
 
-        let mut v3 = input - self.ic2eq - self.k * self.ic1eq;
+        // TPT/ZDF topology matching SvfFilter::process exactly:
+        // v3 = input - ic2eq (feedback from 2nd integrator state)
+        // v1 = a1*ic1eq + a2*v3 (1st integrator output)
+        // v2 = ic2eq + a2*ic1eq + a3*v3 (2nd integrator output)
+        // States updated with trapezoidal integration: ic1eq = v1 + v1 - ic1eq, etc.
+        let mut v3 = input - self.ic2eq;
 
         if self.non_linearity > 0.0 {
             let nl = self.non_linearity;
+            // Newton-Raphson on the implicit equation for v1 with tanh saturation:
+            // f(v1) = v1 - tanh(nl * (a1*ic1eq + a2*(input - ic2eq - k*(v1+v1-ic1eq)))) / nl = 0
+            // We solve for v1 directly (the state that gets saturated in TPT topology)
             for _ in 0..2 {
-                let sat_v3 = (v3 * nl).tanh() / nl;
-                let residual = sat_v3 - (input - self.ic2eq - self.k * self.ic1eq);
-                let d_sat = 1.0 - (v3 * nl).tanh().powi(2);
-                if d_sat.abs() > 1e-6 {
+                let ic1eq_new = v3 + v3 - self.ic1eq; // v1 + v1 - ic1eq from trapezoidal update
+                let v1_sat = self.a1 * ic1eq_new + self.a2 * (input - self.ic2eq - self.k * ic1eq_new);
+                let sat = (v1_sat * nl).tanh() / nl;
+                let residual = sat - v1_sat;
+                let d_sat = 1.0 - (v1_sat * nl).tanh().powi(2);
+                if d_sat.abs() > 1e-12 {
                     v3 -= residual / d_sat;
                 } else {
                     break;
@@ -183,8 +193,9 @@ impl ZdfSvf {
             }
         }
 
+        // After solving (or with no nonlinearity), compute standard TPT state updates
         let v1 = flush_denormal(self.a1 * self.ic1eq + self.a2 * v3);
-        let v2 = flush_denormal(self.ic2eq + self.a3 * self.ic1eq + self.a3 * v3);
+        let v2 = flush_denormal(self.ic2eq + self.a2 * self.ic1eq + self.a3 * v3);
 
         self.ic1eq = flush_denormal(v1 + v1 - self.ic1eq);
         self.ic2eq = flush_denormal(v2 + v2 - self.ic2eq);
@@ -276,6 +287,7 @@ impl TiltEq {
 pub struct IirCascade<const STAGES: usize> {
     sections: [Biquad<f64>; STAGES],
     sample_rate: f64,
+    stages: usize,
 }
 
 impl<const STAGES: usize> IirCascade<STAGES> {
@@ -283,6 +295,7 @@ impl<const STAGES: usize> IirCascade<STAGES> {
         Self {
             sections: [Biquad::default(); STAGES],
             sample_rate: 44100.0,
+            stages: STAGES,
         }
     }
 
@@ -305,13 +318,16 @@ impl<const STAGES: usize> IirCascade<STAGES> {
         }
         self.sample_rate = sample_rate;
         for i in 0..stages {
-            let q = 0.51 + (i as f64 * 0.02).min(0.95);
+            // Butterworth pole Q: Q_i = 1 / (2 * cos((2i+1) * pi / (4 * N)))
+            // where N = stages (total filter order), i = 0..N-1
+            let q = (1.0 / (2.0 * ((2 * i + 1) as f64 * std::f64::consts::PI / (4.0 * stages as f64)).cos())).min(5.0);
             if !self.sections[i]
                 .configure(sample_rate, FilterType::LowPass, frequency, q, 0.0)
             {
                 return false;
             }
         }
+        self.stages = stages;
         true
     }
 
@@ -328,8 +344,9 @@ impl<const STAGES: usize> IirCascade<STAGES> {
             return 0.0;
         }
         let mut out = input;
-        for section in &mut self.sections {
-            out = section.process(out);
+        // Only process active stages (stages < STAGES)
+        for i in 0..self.stages {
+            out = self.sections[i].process(out);
             if !out.is_finite() {
                 return 0.0;
             }
@@ -349,6 +366,7 @@ impl<const STAGES: usize> Default for IirCascade<STAGES> {
 pub struct CombFilter<const DELAY: usize> {
     buffer: [f64; DELAY],
     write_idx: usize,
+    delay_samples: usize,
     feedback: f64,
     feedforward: f64,
     damping: f64,
@@ -360,6 +378,7 @@ impl<const DELAY: usize> Default for CombFilter<DELAY> {
         Self {
             buffer: [0.0; DELAY],
             write_idx: 0,
+            delay_samples: 1,
             feedback: 0.0,
             feedforward: 0.0,
             damping: 0.0,
@@ -400,6 +419,7 @@ impl<const DELAY: usize> CombFilter<DELAY> {
         self.feedback = feedback;
         self.feedforward = feedforward;
         self.damping = damping;
+        self.delay_samples = delay_samples;
         self.buffer.fill(0.0);
         self.write_idx = 0;
         self.damp_state = 0.0;
@@ -418,10 +438,11 @@ impl<const DELAY: usize> CombFilter<DELAY> {
             self.reset();
             return 0.0;
         }
+        // Read back the buffer at write_idx - delay_samples (not DELAY - write_idx)
         let read_idx = if self.write_idx >= DELAY {
             0
         } else {
-            DELAY - self.write_idx
+            self.write_idx - self.delay_samples
         };
         let read_idx = read_idx.min(DELAY - 1);
         let delayed = self.buffer[read_idx];
@@ -474,7 +495,9 @@ impl NaturalPhaseEq {
         }
         self.sample_rate = sample_rate;
         let ok_bell = self.eq.configure(
-            sample_rate,
+            // Configure the inner ZdfSvf at the oversampled rate (2x) so the Bell center
+            // frequency is not halved by the oversampling ratio (near-zero phase design).
+            sample_rate * 2.0,
             FilterType::Bell,
             bell_freq,
             0.707,

@@ -213,12 +213,22 @@ pub fn vari_mu_target_reduction_db<T: Float>(input_level_db: T, threshold_db: T)
     }
 
     let over_threshold = input_level_db - threshold_db;
-    let knee = T::from(2.0).unwrap(); // Ginocchio morbido progressivo di 4 dB (±2 dB)
-    if over_threshold <= -knee {
+    let knee = T::from(2.0).unwrap();
+    if over_threshold <= -knee || !over_threshold.is_finite() {
         return T::zero();
     }
 
-    let over = over_threshold.max(T::zero());
+    // Soft-knee: parabolica raccordo su [-knee, +knee]: reduction = (over + knee)^2 / (4 * knee)
+    if over_threshold < T::zero() {
+        let o = over_threshold + knee;
+        let reduction = o * o / (T::from(4.0).unwrap() * knee);
+        if reduction.is_finite() {
+            return reduction;
+        }
+        return T::zero();
+    }
+
+    let over = over_threshold;
     // Rapporto di compressione non lineare asintotico: ratio = 2.0 + 18.0 * (1 - exp(-over / 18.0))
     // Produce un ratio che varia gradualmente da 2:1 (piccole escursioni) a 20:1 (forti picchi)
     let ratio = T::from(2.0).unwrap()
@@ -226,13 +236,7 @@ pub fn vari_mu_target_reduction_db<T: Float>(input_level_db: T, threshold_db: T)
     // Attenuazione: delta_dB = over * (1 - 1 / ratio)
     let reduction = over * (T::one() - T::one() / ratio);
 
-    // Raccordo parabolico morbido nella regione del knee per garantire continuità senza scalini
-    if over_threshold < knee {
-        let knee_progress = ((over_threshold + knee) / (knee + knee)).min(T::one());
-        reduction * knee_progress * knee_progress
-    } else {
-        reduction
-    }
+    if reduction.is_finite() { reduction } else { T::zero() }
 }
 
 #[cfg(test)]

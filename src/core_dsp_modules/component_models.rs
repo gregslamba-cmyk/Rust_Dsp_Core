@@ -156,10 +156,11 @@ impl TubeStage {
         let low = self.c_state;
         let high = sat - low;
 
-        // Miller roll-off on low band
-        self.m_state += self.m_alpha * (low - self.m_state);
+        // Miller roll-off on the HIGH band (> crossover): rounds the extreme highs
+        // like a real tube stage (the Miller capacitance shunts HF to ground).
+        self.m_state += self.m_alpha * (high - self.m_state);
 
-        flush(self.m_state + high)
+        flush(low + self.m_state)
     }
 }
 // ============================================================================
@@ -280,16 +281,17 @@ impl SolidStateStage {
         let low = self.c_state;
         let high = sat - low;
 
-        // Slew limiting
-        let max_delta = p.slew_per_sec / self.sample_rate;
+        // Slew limiting on the low band (V/s expressed on normalized signal;
+        // cap per-sample delta to full-scale so the limiter can actually engage).
+        let max_delta = (p.slew_per_sec / self.sample_rate).min(1.0);
         let delta = low - self.last_out;
         let limited = delta.clamp(-max_delta, max_delta) + self.last_out;
         self.last_out = flush(limited);
 
-        // Miller roll-off on low band
-        self.m_state += self.m_alpha * (limited - self.m_state);
+        // Miller roll-off on the HIGH band (> crossover): rounds extreme highs.
+        self.m_state += self.m_alpha * (high - self.m_state);
 
-        flush(self.m_state + high)
+        flush(limited + self.m_state)
     }
 }
 
@@ -547,25 +549,41 @@ impl DualStageProgramDependentRelease {
         self.coupling = coupling.clamp(0.0, 1.0);
     }
 
-    /// Computes the program-dependent release coefficient.
-    fn release_coeff(&self, envelope: f64, threshold: f64) -> f64 {
-        // Program-dependent release: faster when envelope is far from threshold.
-        let over = (envelope - threshold).abs();
-        if over <= 0.0 {
-            return 0.0;
-        }
-        let tc_fast = 1.0 / (2.0 * std::f64::consts::PI * self.r_fast);
-        let tc_slow = 1.0 / (2.0 * std::f64::consts::PI * self.r_slow);
-        let tc = tc_fast * (1.0 - self.coupling) + tc_slow * self.coupling;
-        let coeff = 1.0 / (1.0 + tc * over);
-        if !coeff.is_finite() { 0.0 } else { coeff }
+    /// Computes the RC pole coefficient alpha = exp(-1 / (tau * fs)).
+    fn pole_coeff(tau_seconds: f64, sample_rate: f64) -> f64 {
+        let tau = tau_seconds.max(1.0e-6);
+        let sr = sample_rate.max(1.0);
+        let coeff = (-1.0 / (tau * sr)).exp();
+        if coeff.is_finite() { coeff.clamp(0.0, 0.999_999) } else { 0.0 }
     }
 
-    /// Processes one sample: computes gain reduction based on program-dependent release.
+    /// Processes one sample using real dual-stage RC integration on `state_fast` / `state_slow`.
+    ///
+    /// The fast RC stage tracks the program envelope quickly, the slow stage integrates it
+    /// conservatively; the `coupling` parameter blends both states so the resulting release
+    /// becomes program-dependent (fast for short transients, slow for sustained energy).
     pub fn process(&mut self, envelope: f64, threshold: f64) -> f64 {
-        let coeff = self.release_coeff(envelope, threshold);
-        let gain_reduction = coeff * envelope;
-        if gain_reduction.is_finite() { gain_reduction } else { 0.0 }
+        if !envelope.is_finite() || !threshold.is_finite() {
+            return 0.0;
+        }
+        let env = envelope.max(0.0);
+
+        // Fast RC integrator (tau_fast = r_fast * c_fast)
+        let tau_fast = (self.r_fast * self.c_fast).max(1.0e-6);
+        let a_fast = Self::pole_coeff(tau_fast, self.sample_rate);
+        self.state_fast = env + a_fast * (self.state_fast - env);
+
+        // Slow RC integrator (tau_slow = r_slow * c_slow)
+        let tau_slow = (self.r_slow * self.c_slow).max(1.0e-6);
+        let a_slow = Self::pole_coeff(tau_slow, self.sample_rate);
+        self.state_slow = env + a_slow * (self.state_slow - env);
+
+        // Program-dependent blend of the two states
+        let coupled = (1.0 - self.coupling) * self.state_fast + self.coupling * self.state_slow;
+        let over = (coupled - threshold).max(0.0);
+        // Smooth saturating gain reduction
+        let gain_reduction = over / (1.0 + over);
+        flush(gain_reduction)
     }
 
     /// Resets internal state.

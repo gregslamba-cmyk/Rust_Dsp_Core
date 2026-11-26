@@ -14,6 +14,7 @@ use crate::core_dsp_modules::component_models::{
 };
 use crate::core_dsp_modules::nonlinear_stages::flush_denormal;
 use crate::core_dsp_modules::psu_sag::PsuSag;
+use crate::core_dsp_modules::transformer_hysteresis::TransformerHysteresis;
 
 /// Klippel-inspired BL (force factor) and Kms (stiffness) approximation.
 /// Returns (Bl_factor, Kms_factor) normalized to 1.0 at x = 0.
@@ -67,12 +68,23 @@ pub fn cone_breakup_soft_clip(x: f64, drive: f64, excursion: f64) -> f64 {
     }
 }
 
-/// One-pole resonant band (Helmholtz-like box resonance).
+/// Two-pole resonant band-pass (Helmholtz-like box resonance).
+///
+/// Implemented as an RBJ constant-peak-gain band-pass biquad so the cabinet
+/// resonance is a real 2-pole peak at `freq_hz` with quality factor `q`,
+/// instead of a 1-pole low-pass with a mis-scaled cutoff.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CabinetResonance {
-    state: f64,
-    alpha: f64,
-    sample_rate: f64,
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+    active: bool,
 }
 
 impl CabinetResonance {
@@ -81,38 +93,71 @@ impl CabinetResonance {
     }
 
     pub fn configure(&mut self, sample_rate: f64, freq_hz: f64, q: f64) {
-        let sr = sample_rate.max(1.0);
-        self.sample_rate = sr;
-        if !freq_hz.is_finite() || freq_hz <= 0.0 || !q.is_finite() {
-            self.alpha = 0.0;
+        self.active = false;
+        if !sample_rate.is_finite()
+            || sample_rate <= 0.0
+            || !freq_hz.is_finite()
+            || freq_hz <= 0.0
+            || !q.is_finite()
+            || q <= 0.0
+        {
+            // Bypass: unity passthrough.
+            self.b0 = 1.0;
+            self.b1 = 0.0;
+            self.b2 = 0.0;
+            self.a1 = 0.0;
+            self.a2 = 0.0;
+            self.reset();
             return;
         }
-        let bw = freq_hz / q.max(0.1);
-        let c = (std::f64::consts::PI * bw / sr).tan();
-        self.alpha = c / (1.0 + c);
+        let f0 = freq_hz.min(sample_rate * 0.49);
+        let w0 = std::f64::consts::TAU * f0 / sample_rate;
+        let q = q.max(0.1);
+        let alpha = w0.sin() / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        // Constant-peak-gain band-pass (RBJ cookbook).
+        self.b0 = alpha / a0;
+        self.b1 = 0.0;
+        self.b2 = -alpha / a0;
+        self.a1 = -2.0 * w0.cos() / a0;
+        self.a2 = (1.0 - alpha) / a0;
+        self.active = true;
         self.reset();
     }
 
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
         let x = if input.is_finite() { input } else { 0.0 };
-        if self.alpha <= 0.0 {
+        if !self.active {
             return x;
         }
-        self.state += self.alpha * (x - self.state);
-        flush_denormal(self.state)
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = flush_denormal(y);
+        self.y1
     }
 
     pub fn reset(&mut self) {
-        self.state = 0.0;
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
     }
 }
 
-/// Low-frequency head-bump shelf (LF boost near 90 Hz).
+/// Low-frequency head-bump shelf (LF boost/cut near 90 Hz).
+///
+/// Implemented as a proper low-shelf: `y = x + (g - 1) * lowpass(x)`, so it
+/// boosts/cuts the lows while leaving the highs untouched (previously it
+/// incorrectly boosted the high band).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HeadBumpShelf {
     state: f64,
     alpha: f64,
+    gain: f64,
     sample_rate: f64,
 }
 
@@ -126,23 +171,25 @@ impl HeadBumpShelf {
         self.sample_rate = sr;
         if !cutoff_hz.is_finite() || cutoff_hz <= 0.0 || !gain_db.is_finite() {
             self.alpha = 0.0;
+            self.gain = 1.0;
             return;
         }
-        let g = (10.0_f64.powf(gain_db / 20.0) - 1.0).clamp(-0.99, 5.0);
         let c = (std::f64::consts::PI * cutoff_hz / sr).tan();
-        self.alpha = (c / (1.0 + c)) * g.clamp(-1.0, 1.0);
+        self.alpha = c / (1.0 + c);
+        self.gain = 10.0_f64.powf(gain_db / 20.0).clamp(0.1, 10.0);
         self.reset();
     }
 
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
         let x = if input.is_finite() { input } else { 0.0 };
-        if self.alpha == 0.0 {
+        if self.alpha <= 0.0 || (self.gain - 1.0).abs() < 1.0e-12 {
             return x;
         }
         self.state += self.alpha * (x - self.state);
-        let hp = x - self.state;
-        flush_denormal(x + self.alpha * hp)
+        self.state = flush_denormal(self.state);
+        // Low-shelf: boost/cut lows, leave highs untouched.
+        flush_denormal(x + (self.gain - 1.0) * self.state)
     }
 
     pub fn reset(&mut self) {
@@ -245,6 +292,8 @@ pub struct CabinetSpeaker {
     mic_mix: f64,
     sample_rate: f64,
     custom_circuit: MicPreampCircuit,
+    mic_tube: TubeStage,
+    mic_transformer: TransformerHysteresis,
 }
 
 impl Default for CabinetSpeaker {
@@ -255,6 +304,8 @@ impl Default for CabinetSpeaker {
             mic_mix: 0.6,
             sample_rate: 48000.0,
             custom_circuit: MicPreampCircuit::default(),
+            mic_tube: TubeStage::new(TubeModel::Octal6sn7, 48000.0),
+            mic_transformer: TransformerHysteresis::new(),
         }
     }
 }
@@ -270,7 +321,24 @@ impl CabinetSpeaker {
         self.sample_rate = sr;
         self.driver_l.configure(sr);
         self.driver_r.configure(sr);
+        self.configure_mic();
         true
+    }
+
+    /// (Re)configures the persistent microphone preamp stage from the active circuit.
+    fn configure_mic(&mut self) {
+        let tube_model = match self.custom_circuit {
+            MicPreampCircuit::Auto(capsule) => mic_default_tube(capsule),
+            MicPreampCircuit::Custom { tube, .. } => tube,
+        };
+        self.mic_tube = TubeStage::new(tube_model, self.sample_rate);
+        self.mic_transformer = if let MicPreampCircuit::Custom { transformer: Some(t), .. } =
+            self.custom_circuit
+        {
+            create_transformer(t, self.sample_rate)
+        } else {
+            TransformerHysteresis::new()
+        };
     }
 
     pub fn reset(&mut self) {
@@ -332,6 +400,7 @@ impl CabinetSpeaker {
     /// Marinair transformer) overriding the automatic historical default.
     pub fn with_custom_circuit(mut self, circuit: MicPreampCircuit) -> Self {
         self.custom_circuit = circuit;
+        self.configure_mic();
         self
     }
 
@@ -344,24 +413,17 @@ impl CabinetSpeaker {
     /// Auto circuits use historically accurate tube/transformer per capsule model;
     /// custom circuits combine the override tube and transformer (hybrid virtual mic).
     #[inline]
-    pub fn mic_preamp(&self, input: f64, drive_db: f64) -> f64 {
+    pub fn mic_preamp(&mut self, input: f64, drive_db: f64) -> f64 {
         if !input.is_finite() {
             return 0.0;
         }
-        let tube_model = match self.custom_circuit {
-            MicPreampCircuit::Auto(capsule) => mic_default_tube(capsule),
-            MicPreampCircuit::Custom { tube, .. } => tube,
-        };
-        let mut stage = TubeStage::new(tube_model, self.sample_rate);
-        let mut out = stage.process_sample(input, drive_db);
-
+        let mut out = self.mic_tube.process_sample(input, drive_db);
         if let MicPreampCircuit::Custom {
-            transformer: Some(t),
+            transformer: Some(_),
             ..
         } = self.custom_circuit
         {
-            let mut tr = create_transformer(t, self.sample_rate);
-            out = tr.process(out, 0.1, 0.5, 0.5);
+            out = self.mic_transformer.process(out, 0.1, 0.5, 0.5);
         }
         flush_denormal(out)
     }

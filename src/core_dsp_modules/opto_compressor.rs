@@ -78,6 +78,16 @@ impl<T: Float> Default for OptoCell<T> {
 }
 
 impl<T: Float> OptoCell<T> {
+    /// Helper generico per flush denormali senza usare .unwrap() nel percorso audio.
+    #[inline]
+    fn flush_denormal(x: T) -> T {
+        let cutoff = T::from(1.0e-30).unwrap_or_else(T::zero);
+        if !x.is_finite() || x.abs() < cutoff {
+            T::zero()
+        } else {
+            x
+        }
+    }
     /// Inizializza la cella ottica configurando la frequenza di campionamento ed eseguendo il reset dello stato.
     ///
     /// # Parametri
@@ -142,8 +152,10 @@ impl<T: Float> OptoCell<T> {
 
         // FASE DI ATTACCO: la luce sul fotoresistore aumenta, riducendo rapidamente la resistenza
         if target > self.reduction_db {
-            self.fast_release = true;
-            self.release_start_db = target;
+            // Un nuovo attacco azzera il latch di rilascio: il release_start_db verra'
+            // catturato come reduction_db reale nel momento in cui inizia il rilascio.
+            self.fast_release = false;
+            self.release_start_db = T::zero();
 
             // L'attacco ottico diventa leggermente più veloce su transienti più forti (caratteristica T4B)
             let attack_base = if solid_state {
@@ -158,13 +170,17 @@ impl<T: Float> OptoCell<T> {
                         * (target / T::from(20.0).unwrap()).min(T::one()));
             let coefficient = Self::coefficient(attack_seconds, self.sample_rate);
             // Integrazione esponenziale dell'attacco
-            self.reduction_db = target + coefficient * (self.reduction_db - target);
+            self.reduction_db = Self::flush_denormal(
+                target + coefficient * (self.reduction_db - target),
+            );
 
         // FASE DI RILASCIO: il pannello si spegne, il drogaggio CdS dissipa lentamente i portatori di carica
         } else if target < self.reduction_db {
-            // Inizializzazione della fase di rilascio se non già attiva
+            // Inizializzazione della fase di rilascio: cattura la riduzione REALE al momento
+            // dell'ingresso in release (non il target, che potrebbe essere molto piu' alto).
             if !self.fast_release && self.release_start_db <= T::zero() {
                 self.release_start_db = self.reduction_db;
+                self.fast_release = true;
                 let (minimum, range) = if solid_state {
                     (
                         OPTO_A3A_SLOW_RELEASE_MIN_SECONDS,
@@ -208,13 +224,15 @@ impl<T: Float> OptoCell<T> {
                 } else {
                     OPTO_A2A_FAST_RELEASE_SECONDS
                 };
-                T::from(half_life).unwrap() / T::from(std::f64::consts::LN_2).unwrap()
+                T::from(half_life).unwrap_or_else(T::zero) / T::from(std::f64::consts::LN_2).unwrap_or_else(T::zero)
             } else {
                 self.slow_release_seconds
             };
             let coefficient = Self::coefficient(release_seconds, self.sample_rate);
-            // Integrazione esponenziale del rilascio
-            self.reduction_db = target + coefficient * (self.reduction_db - target);
+            // Integrazione esponenziale del rilascio (con flush denormal)
+            self.reduction_db = Self::flush_denormal(
+                target + coefficient * (self.reduction_db - target),
+            );
         }
 
         self.reduction_db

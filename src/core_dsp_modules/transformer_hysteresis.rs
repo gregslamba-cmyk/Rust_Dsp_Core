@@ -3,6 +3,8 @@ const DEFAULT_CROSSOVER_HZ: f64 = 180.0;
 /// Corner of the output DC blocker that removes the static bias of the asymmetric core.
 const DC_BLOCK_HZ: f64 = 5.0;
 
+use crate::core_dsp_modules::nonlinear_stages::flush_denormal;
+
 #[derive(Clone, Copy, Debug)]
 pub struct TransformerHysteresis {
     flux: f64,
@@ -90,17 +92,21 @@ impl TransformerHysteresis {
         // Two-band split: the low band carries the core and its harmonic weight,
         // the high band is only gently limited so transients never turn glassy.
         self.low_state += self.low_alpha * (input - self.low_state);
+        self.low_state = flush_denormal(self.low_state);
         let low = self.low_state;
         let high = input - low;
 
         let bass_drive = drive * (1.0 + 1.5 * bass_weight);
         let bias = 0.12 * bass_weight;
         let bias_tanh = bias.tanh();
+        // Flux state integrates the driven low band with hysteresis memory.
+        // Hysteresis acts as the magnetic memory coefficient (near 1.0 = strong memory).
         self.flux = low * bass_drive + self.flux * hysteresis;
+        // Bound the magnetic flux to a physical saturation limit and flush denormals.
+        self.flux = flush_denormal(self.flux.clamp(-8.0, 8.0));
         // Zero-mean asymmetric core: at silence the output is exactly zero, while the
         // bias still provides the warm 2nd-harmonic content of a Class-A stage.
         let core = (self.flux + bias).tanh() - bias_tanh;
-        self.flux = core * (1.0 - hysteresis);
         let core_norm = (bass_drive * (1.0 - bias_tanh * bias_tanh)).max(1.0e-4);
         let low_out = core / core_norm;
 
@@ -111,6 +117,7 @@ impl TransformerHysteresis {
 
         // Remove the static bias of the asymmetric core while keeping its 2nd harmonic.
         self.dc_state += self.dc_alpha * (mixed - self.dc_state);
+        self.dc_state = flush_denormal(self.dc_state);
         let mut output = mixed - self.dc_state;
 
         if self.max_slew_per_second > 0.0 && self.sample_rate > 0.0 {

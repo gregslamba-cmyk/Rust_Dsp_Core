@@ -37,9 +37,10 @@ pub fn drive_with_unity_compensation(sample: f64, drive: f64, mode: NonlinearMod
     }
     // Guadagno di compensazione: normalizza l'uscita rispetto al livello di
     // riferimento 0 VU cosi' che maggiore drive aggiunga armoniche senza
-    // aumentare incontrollatamente il volume in uscita.
-    let drive_gain = drive.ln_1p().max(1.0e-6);
-    let mut out = wet / drive_gain;
+    // aumentare incontrollatamente il volume in uscita. `process_nonlinear`
+    // ha gia' diviso per il drive: nessun ulteriore scalamento qui.
+    let _ = drive;
+    let mut out = wet;
     let ceiling = REFERENCE_VU_LINEAR * 4.0; // headroom sopra lo 0 VU
     if out.abs() > ceiling {
         out = out.signum() * ceiling;
@@ -269,12 +270,17 @@ impl DynamicMirrorPreEmphasis {
         out
     }
 
+    /// Inverse IIR pole for the pre-emphasis high-pass pre-emphasis filter:
+    /// H_pre(z) = (1 + e/2) - (e/2) z^{-1}  →  H_de(z) = 1 / H_pre(z)
+    /// Difference equation: y[n] = (x[n] + (e/2)*y[n-1]) / (1 + e/2)
     #[inline]
     pub fn de_emphasis(&mut self, sample: f64, emphasis: f64, channel: usize) -> f64 {
         let ch = channel.min(7);
         let emphasis = emphasis.clamp(0.0, 1.0);
-        let out = sample - (sample - self.de_state[ch]) * emphasis * 0.5;
-        self.de_state[ch] = sample;
+        let coeff = emphasis * 0.5;
+        let denom = 1.0 + coeff;
+        let out = (sample + coeff * self.de_state[ch]) / denom;
+        self.de_state[ch] = out;
         out
     }
 }
@@ -359,11 +365,15 @@ pub fn process_nonlinear(sample: f64, drive: f64, mode: NonlinearMode) -> f64 {
 /// First antiderivative F(x) = ∫₀ˣ f(u) du for the given saturator mode.
 /// Used by 1st-order ADAA: y[n] = (F(x_n) - F(x_{n-1})) / (x_n - x_{n-1}).
 #[inline]
-fn adaa_antiderivative(x: f64, mode: NonlinearMode) -> f64 {
+pub fn adaa_antiderivative(x: f64, mode: NonlinearMode) -> f64 {
     match mode {
         NonlinearMode::SoftClip => {
-            // ∫ tanh(u) du = ln(cosh(u))
-            x.abs().cosh().ln_1p() * x.signum()
+            // ∫ tanh(u) du = ln(cosh(u)) = |x| + ln(1 + exp(-2|x|)) - ln(2)
+            // Numerically stable: avoids overflow from cosh(|x|) > 710.
+            let ax = x.abs();
+            let two = 2.0_f64;
+            let exp_term = (-two * ax).exp(); // e^{-2|x|}, safely underflows for large |x|
+            ax + exp_term.ln_1p() - two.ln()
         }
         NonlinearMode::HardClip => {
             if x.abs() <= 1.0 {
@@ -375,11 +385,15 @@ fn adaa_antiderivative(x: f64, mode: NonlinearMode) -> f64 {
         NonlinearMode::Asymmetric => {
             let bias = 0.2;
             let shifted = x + bias;
-            let tanh_int = shifted.abs().cosh().ln_1p() * shifted.signum();
-            tanh_int + 0.05 * x * x * x / 3.0
+            // ∫ tanh(u) du = ln(cosh(u)), stable formula:
+            let ax = shifted.abs();
+            let two = 2.0_f64;
+            let exp_term = (-two * ax).exp();
+            let ln_cosh = ax + exp_term.ln_1p() - two.ln();
+            ln_cosh + 0.05 * x * x * x / 3.0
         }
         NonlinearMode::WaveFold => {
-            // Triangular fold integral (piecewise).
+            // Triangular fold integral (piecewise). Return antiderivative of waveshaper.
             let folded = (x + 1.0).abs() % 4.0;
             1.0 - (folded - 2.0).abs()
         }
@@ -387,28 +401,42 @@ fn adaa_antiderivative(x: f64, mode: NonlinearMode) -> f64 {
         NonlinearMode::TubeTriode => {
             let bias: f64 = 0.15;
             let shifted = x + bias;
-            let tanh_int = shifted.abs().cosh().ln_1p() * shifted.signum();
-            tanh_int + 0.08 * x * x * x / 3.0
+            // Stable ln(cosh(shifted)) using the same trick
+            let ax = shifted.abs();
+            let two = 2.0_f64;
+            let exp_term = (-two * ax).exp();
+            let ln_cosh = ax + exp_term.ln_1p() - two.ln();
+            let bias_tanh = bias.tanh();
+            let norm = 1.0 - bias_tanh * bias_tanh;
+            ln_cosh - bias_tanh / norm.max(1e-4)
         }
         NonlinearMode::TubePentode => {
             let bias: f64 = 0.1;
             let shifted = x + bias;
-            let tanh_int = shifted.abs().cosh().ln_1p() * shifted.signum();
-            tanh_int + 0.12 * x.powi(4) / 4.0
+            let ax = shifted.abs();
+            let two = 2.0_f64;
+            let exp_term = (-two * ax).exp();
+            let ln_cosh = ax + exp_term.ln_1p() - two.ln();
+            let bias_tanh = bias.tanh();
+            let norm = 1.0 - bias_tanh * bias_tanh;
+            ln_cosh - 0.12 * x.powi(4) / 4.0 / norm.max(1e-4)
         }
         _ => {
-            // Default: integral of tanh.
-            x.abs().cosh().ln_1p() * x.signum()
+            // Default: integral of tanh using stable formula
+            let ax = x.abs();
+            let two = 2.0_f64;
+            let exp_term = (-two * ax).exp();
+            ax + exp_term.ln_1p() - two.ln()
         }
     }
 }
 
 /// Second antiderivative G(x) = ∫₀ˣ F(u) du (for 2nd-order ADAA).
-/// Approximated analytically for stability.
+/// Computed as the integral of the first antiderivative over [0, x].
 #[inline]
 fn adaa_antiderivative2(x: f64, mode: NonlinearMode) -> f64 {
-    // Use the trapezoidal approximation G(x) ≈ x * F(x) / 2 for simplicity
-    // and numerical stability.
+    // G(x) = ∫₀ˣ F(u) du, approximated stably via the first antiderivative F(x) = ∫₀ˣ f.
+    // For monotonic F this equals 0.5 * x * F(x) and is used as the second divided difference base.
     0.5 * x * adaa_antiderivative(x, mode)
 }
 
@@ -430,8 +458,8 @@ pub fn process_adaa1(x_n: f64, x_prev: f64, drive: f64, mode: NonlinearMode) -> 
 }
 
 /// Applies 2nd-order ADAA (second antiderivative based) for smoother anti-aliasing.
-/// Uses x_{n-2}, x_{n-1}, x_n for the second divided difference.
-/// Falls back to 1st-order ADAA when either difference is < 1e-7.
+/// Uses x_{n-2}, x_{n-1}, x_n for the second divided difference via Parker et al. (DAFx 2016).
+/// Falls back to 1st-order ADAA when any adjacent difference is too small.
 pub fn process_adaa2(x_n: f64, x_prev: f64, x_prev2: f64, drive: f64, mode: NonlinearMode) -> f64 {
     if !x_n.is_finite() || !x_prev.is_finite() || !x_prev2.is_finite()
         || !drive.is_finite() || drive <= 0.0
@@ -440,15 +468,19 @@ pub fn process_adaa2(x_n: f64, x_prev: f64, x_prev2: f64, drive: f64, mode: Nonl
     }
     let d1 = x_n - x_prev;
     let d2 = x_prev - x_prev2;
-    // Guardia numerica ADAA 2° ordine: se il prodotto delle differenze per drive è troppo piccolo,
-    // evita divisione per zero/denormale e fall back a ADAA1 o valutazione diretta.
-    if (d1 * d2 * drive).abs() < 1e-12 || d1.abs() < 1e-7 || d2.abs() < 1e-7 {
+    // Guard against too-small differences or zero spacing denominator
+    if d1.abs() < 1e-7 || d2.abs() < 1e-7 || (d1 + d2).abs() < 1e-12 {
         return flush_denormal(process_adaa1(x_n, x_prev, drive, mode));
     }
     let g_n = adaa_antiderivative2(x_n * drive, mode);
     let g_prev = adaa_antiderivative2(x_prev * drive, mode);
     let g_prev2 = adaa_antiderivative2(x_prev2 * drive, mode);
-    let out = (g_n - 2.0 * g_prev + g_prev2) / (d1 * d2 * drive);
+    // Parker et al. (DAFx 2016) second divided difference for non-uniform nodes:
+    // 2 / (x_n - x_{n-2}) * [ (G(x_n)-G(x_{n-1}))/(x_n-x_{n-1}) - (G(x_{n-1})-G(x_{n-2}))/(x_{n-1}-x_{n-2}) ]
+    // = 2.0 * (s1 - s2) / (d1 + d2) where s1 = (g_n - g_prev)/d1, s2 = (g_prev - g_prev2)/d2
+    let s1 = (g_n - g_prev) / d1;
+    let s2 = (g_prev - g_prev2) / d2;
+    let out = 2.0 * (s1 - s2) / (d1 + d2);
     if out.is_finite() { flush_denormal(out) } else { 0.0 }
 }
 

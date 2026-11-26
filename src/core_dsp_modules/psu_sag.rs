@@ -33,6 +33,10 @@ pub struct PsuSag<T: Float> {
     ripple_enabled: bool,
     /// Fase dell'oscillatore di ripple di rete [0, 2π].
     ripple_phase: f64,
+    /// Fase del generatore di rumore termico (avanza per campione).
+    noise_phase: f64,
+    /// Frequenza di campionamento in Hz.
+    sample_rate: f64,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -45,6 +49,8 @@ impl<T: Float> Default for PsuSag<T> {
             noise_level: 0.0, // Rigorosamente spento di default per silenzio a riposo
             ripple_enabled: false, // Rigorosamente disabilitato di default
             ripple_phase: 0.0,
+            noise_phase: 0.0,
+            sample_rate: 44100.0,
             _marker: std::marker::PhantomData,
         }
     }
@@ -80,6 +86,8 @@ impl<T: Float> PsuSag<T> {
         self.depth = dep.clamp(0.0, 1.0);
         self.envelope = 0.0;
         self.ripple_phase = 0.0;
+        self.noise_phase = 0.0;
+        self.sample_rate = sr;
         true
     }
 
@@ -115,6 +123,10 @@ impl<T: Float> PsuSag<T> {
 
         // Filtro passa-basso mononucleo (IIR a un polo) per l'inseguimento del carico di corrente DC
         self.envelope = level + self.coefficient * (self.envelope - level);
+        // Denormal guard: azzera residui subnormali per evitare rallentamenti da denormali.
+        if self.envelope.abs() < 1.0e-28 {
+            self.envelope = 0.0;
+        }
 
         // Funzione di carico non lineare satura: L / (1 + L) per modellare il limite fisico dell'assorbimento
         let normalized_load = self.envelope / (1.0 + self.envelope);
@@ -123,8 +135,10 @@ impl<T: Float> PsuSag<T> {
 
         // Modulazione opzionale di ripple di rete a 100 Hz (solo con segnale presente > -120 dBFS)
         if self.ripple_enabled && level > 1e-6 {
-            // Incremento di fase per simulare il ripple a 100 Hz (frequenza di raddrizzamento a doppia semionda)
-            self.ripple_phase += 0.01;
+            // Incremento di fase parametrizzato sulla frequenza di campionamento reale (ripple 100 Hz,
+            // rettificazione a doppia semionda).
+            let sr = if self.sample_rate > 0.0 { self.sample_rate } else { 44100.0 };
+            self.ripple_phase += std::f64::consts::TAU * 100.0 / sr;
             if self.ripple_phase > std::f64::consts::TAU {
                 self.ripple_phase -= std::f64::consts::TAU;
             }
@@ -132,9 +146,14 @@ impl<T: Float> PsuSag<T> {
             sag += self.ripple_phase.sin() * 0.001 * self.depth;
         }
 
-        // Micro-fluttuazione termica di rumore (eseguita solo in presenza di audio per evitare hiss a riposo)
+        // Micro-fluttuazione termica di rumore (eseguita solo in presenza di audio per evitare hiss a riposo).
+        // La fase avanza per campione così il rumore non degenera in un offset DC su toni stazionari.
         if self.noise_level > 0.0 && level > 1e-6 {
-            let pseudo_noise = (self.envelope * 12345.6789).sin() * self.noise_level * 0.001;
+            self.noise_phase += 0.011_937;
+            if self.noise_phase > std::f64::consts::TAU {
+                self.noise_phase -= std::f64::consts::TAU;
+            }
+            let pseudo_noise = self.noise_phase.sin() * self.noise_level * 0.001;
             sag += pseudo_noise;
         }
 
