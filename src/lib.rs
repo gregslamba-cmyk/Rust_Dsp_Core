@@ -28,6 +28,7 @@ pub use core_dsp_modules::fft_convolution;
 pub use core_dsp_modules::linear_phase_fir;
 pub use core_dsp_modules::loudness_rider;
 pub use core_dsp_modules::partitioned_convolver;
+pub use core_dsp_modules::psychoacoustics;
 pub use core_dsp_modules::spectral_analyzer;
 pub use core_dsp_modules::tape_physics;
 pub use core_dsp_modules::pitch_shifter;
