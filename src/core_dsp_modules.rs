@@ -1,5 +1,6 @@
 pub mod dsp_graph;
 pub mod psychoacoustics;
+pub mod reference_profiles;
 pub mod spatial_3d;
 pub mod analog_variance;
 pub mod component_models;
