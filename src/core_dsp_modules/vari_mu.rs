@@ -51,8 +51,8 @@ impl TimeConstant {
             Self::VI => (0.3, Some(25.0)),
         };
         (
-            T::from(first).unwrap(),
-            second.map(|seconds| T::from(seconds).unwrap()),
+            T::from(first).unwrap_or(T::zero()),
+            second.map(|seconds| T::from(seconds).unwrap_or(T::zero())),
         )
     }
 }
@@ -143,7 +143,7 @@ impl<T: Float> VariMuCell<T> {
         if detector_level > self.envelope {
             // Calcolo del polo di attacco: alpha = exp(-1 / (fs * t_attack))
             let attack =
-                (-T::one() / (self.sample_rate * T::from(VARI_MU_ATTACK_SECONDS).unwrap())).exp();
+                (-T::one() / (self.sample_rate * T::from(VARI_MU_ATTACK_SECONDS).unwrap_or(T::one()))).exp();
             self.envelope = detector_level + attack * (self.envelope - detector_level);
         } else {
             // Rilascio dell'inviluppo primario pilotato dalla rete RC di scarica successiva
@@ -152,7 +152,7 @@ impl<T: Float> VariMuCell<T> {
 
         // Conversione dell'inviluppo di tensione in dBFS (con floor di sicurezza a -240 dBFS)
         let level_db =
-            T::from(20.0).unwrap() * self.envelope.max(T::from(1.0e-12).unwrap()).log10();
+            T::from(20.0).unwrap_or(T::zero()) * self.envelope.max(T::from(1.0e-12).unwrap_or(T::zero())).log10();
         // Calcolo della riduzione teorica non lineare secondo la caratteristica curva Vari-Mu
         let target = vari_mu_target_reduction_db(level_db, threshold_db);
 
@@ -161,7 +161,7 @@ impl<T: Float> VariMuCell<T> {
             self.release_start_db = T::zero();
             self.in_slow_release = false;
             let attack =
-                (-T::one() / (self.sample_rate * T::from(VARI_MU_ATTACK_SECONDS).unwrap())).exp();
+                (-T::one() / (self.sample_rate * T::from(VARI_MU_ATTACK_SECONDS).unwrap_or(T::one()))).exp();
             self.gain_reduction_db = target + attack * (self.gain_reduction_db - target);
 
         // FASE DI RILASCIO: la carica accumulata nelle capacità di griglia decade secondo le costanti I-VI
@@ -174,7 +174,7 @@ impl<T: Float> VariMuCell<T> {
             // Per le costanti V e VI, dopo aver recuperato il primo 50% di dB si entra nella fase di coda lenta
             if !self.in_slow_release
                 && slow_release.is_some()
-                && self.gain_reduction_db <= self.release_start_db * T::from(0.5).unwrap()
+                && self.gain_reduction_db <= self.release_start_db * T::from(0.5).unwrap_or(T::zero())
             {
                 self.in_slow_release = true;
             }
@@ -213,7 +213,7 @@ pub fn vari_mu_target_reduction_db<T: Float>(input_level_db: T, threshold_db: T)
     }
 
     let over_threshold = input_level_db - threshold_db;
-    let knee = T::from(2.0).unwrap();
+    let knee = T::from(2.0).unwrap_or(T::one());
     if over_threshold <= -knee || !over_threshold.is_finite() {
         return T::zero();
     }
@@ -221,7 +221,7 @@ pub fn vari_mu_target_reduction_db<T: Float>(input_level_db: T, threshold_db: T)
     // Soft-knee: parabolica raccordo su [-knee, +knee]: reduction = (over + knee)^2 / (4 * knee)
     if over_threshold < T::zero() {
         let o = over_threshold + knee;
-        let reduction = o * o / (T::from(4.0).unwrap() * knee);
+        let reduction = o * o / (T::from(4.0).unwrap_or(T::one()) * knee);
         if reduction.is_finite() {
             return reduction;
         }
@@ -231,8 +231,8 @@ pub fn vari_mu_target_reduction_db<T: Float>(input_level_db: T, threshold_db: T)
     let over = over_threshold;
     // Rapporto di compressione non lineare asintotico: ratio = 2.0 + 18.0 * (1 - exp(-over / 18.0))
     // Produce un ratio che varia gradualmente da 2:1 (piccole escursioni) a 20:1 (forti picchi)
-    let ratio = T::from(2.0).unwrap()
-        + T::from(18.0).unwrap() * (T::one() - (-over / T::from(18.0).unwrap()).exp());
+    let ratio = T::from(2.0).unwrap_or(T::one())
+        + T::from(18.0).unwrap_or(T::one()) * (T::one() - (-over / T::from(18.0).unwrap_or(T::one())).exp());
     // Attenuazione: delta_dB = over * (1 - 1 / ratio)
     let reduction = over * (T::one() - T::one() / ratio);
 

@@ -40,8 +40,8 @@ impl<T: Float> Default for EqBand<T> {
         Self {
             enabled: false,
             kind: FilterType::Bell,
-            frequency_hz: T::from(1_000.0).unwrap(),
-            q: T::from(0.707).unwrap(),
+            frequency_hz: T::from(1_000.0).unwrap_or(T::zero()),
+            q: T::from(0.707).unwrap_or(T::zero()),
             gain_db: T::zero(),
         }
     }
@@ -95,10 +95,10 @@ impl<const TAPS: usize, T: Float> LinearPhaseFir<TAPS, T> {
         }
 
         let center = TAPS / 2;
-        let tap_count = T::from(TAPS).unwrap();
+        let tap_count = T::from(TAPS).unwrap_or(T::zero());
         let mut magnitudes = [T::zero(); MAX_LINEAR_PHASE_TAPS / 2 + 1];
         for (bin, magnitude) in magnitudes[..=center].iter_mut().enumerate() {
-            let omega = T::from(std::f64::consts::TAU * bin as f64 / TAPS as f64).unwrap();
+            let omega = T::from(std::f64::consts::TAU * bin as f64 / TAPS as f64).unwrap_or(T::zero());
             let mut response = T::one();
             for (band, filter) in bands.iter().zip(minimum_phase_filters) {
                 if band.enabled {
@@ -112,19 +112,19 @@ impl<const TAPS: usize, T: Float> LinearPhaseFir<TAPS, T> {
         }
 
         let two = T::one() + T::one();
-        let pi = T::from(std::f64::consts::PI).unwrap();
+        let pi = T::from(std::f64::consts::PI).unwrap_or(T::zero());
         let mut coefficients = [T::zero(); TAPS];
         for distance in 0..=center {
             let mut sum = magnitudes[0];
             for (bin, magnitude) in magnitudes.iter().enumerate().skip(1) {
-                let angle = two * pi * T::from(bin * distance).unwrap() / tap_count;
+                let angle = two * pi * T::from(bin * distance).unwrap_or(T::zero()) / tap_count;
                 sum = sum + two * *magnitude * angle.cos();
             }
             let ideal = sum / tap_count;
-            let normalized_distance = T::from(distance).unwrap() / T::from(center).unwrap();
-            let window = T::from(0.42).unwrap()
-                + T::from(0.5).unwrap() * (pi * normalized_distance).cos()
-                + T::from(0.08).unwrap() * (two * pi * normalized_distance).cos();
+            let normalized_distance = T::from(distance).unwrap_or(T::zero()) / T::from(center).unwrap_or(T::zero());
+            let window = T::from(0.42).unwrap_or(T::zero())
+                + T::from(0.5).unwrap_or(T::zero()) * (pi * normalized_distance).cos()
+                + T::from(0.08).unwrap_or(T::zero()) * (two * pi * normalized_distance).cos();
             let coefficient = ideal * window;
             coefficients[center - distance] = coefficient;
             coefficients[center + distance] = coefficient;
@@ -135,8 +135,8 @@ impl<const TAPS: usize, T: Float> LinearPhaseFir<TAPS, T> {
             .copied()
             .fold(T::zero(), |sum, value| sum + value);
         let target_dc = magnitudes[0];
-        if dc.is_finite() && dc.abs() > T::from(1.0e-12).unwrap() && target_dc.is_finite() {
-            if target_dc.abs() <= T::from(1.0e-6).unwrap() {
+        if dc.is_finite() && dc.abs() > T::from(1.0e-12).unwrap_or(T::zero()) && target_dc.is_finite() {
+            if target_dc.abs() <= T::from(1.0e-6).unwrap_or(T::zero()) {
                 coefficients[center] = coefficients[center] - dc;
             } else {
                 let correction = target_dc / dc;
@@ -144,7 +144,7 @@ impl<const TAPS: usize, T: Float> LinearPhaseFir<TAPS, T> {
                     *coefficient = *coefficient * correction;
                 }
             }
-        } else if target_dc.abs() > T::from(1.0e-6).unwrap() {
+        } else if target_dc.abs() > T::from(1.0e-6).unwrap_or(T::zero()) {
             return false;
         }
 
@@ -342,7 +342,7 @@ mod tests {
             .enumerate()
             .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
             .map(|(index, _)| index)
-            .unwrap();
+            .unwrap_or(0);
         assert_eq!(peak_index, 128);
         assert!(output[128].abs() > 0.01);
     }

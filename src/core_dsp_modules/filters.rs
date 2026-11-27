@@ -10,7 +10,7 @@
 
 #[inline]
 fn flush_denormal<T: Float>(x: T) -> T {
-    if !x.is_finite() || x.abs() < T::from(1.0e-28).unwrap() {
+    if !x.is_finite() || x.abs() < T::from(1.0e-28).unwrap_or(T::zero()) {
         T::zero()
     } else {
         x
@@ -77,9 +77,9 @@ impl<T: Float> SvfFilter<T> {
         }
 
         self.filter_type = kind;
-        let pi = T::from(std::f64::consts::PI).unwrap();
+        let pi = T::from(std::f64::consts::PI).unwrap_or(T::one());
         let g = (pi * frequency / sample_rate).tan();
-        let k = T::one() / q.max(T::from(0.001).unwrap());
+        let k = T::one() / q.max(T::from(0.001).unwrap_or(T::zero()));
 
         let a1 = T::one() / (T::one() + g * (g + k));
         let a2 = g * a1;
@@ -90,9 +90,7 @@ impl<T: Float> SvfFilter<T> {
         self.a3 = a3;
         self.k = k;
 
-        let a = T::from(10.0)
-            .unwrap()
-            .powf(gain_db / T::from(40.0).unwrap());
+        let a = T::from(10.0_f64).unwrap_or(T::one()).powf(gain_db / T::from(40.0).unwrap_or(T::one()));
 
         match kind {
             FilterType::LowPass => {
@@ -241,13 +239,13 @@ impl<T: Float> Biquad<T> {
         }
 
         let two = T::one() + T::one();
-        let w0 = two * T::from(std::f64::consts::PI).unwrap() * frequency / sample_rate;
+        let w0 = two * T::from(std::f64::consts::PI).unwrap_or(T::one()) * frequency / sample_rate;
         let cos = w0.cos();
         let sin = w0.sin();
         let alpha = sin / (two * q);
         let a = T::from(10.0)
-            .unwrap()
-            .powf(gain_db / T::from(40.0).unwrap());
+            .unwrap_or(T::one())
+            .powf(gain_db / T::from(40.0).unwrap_or(T::one()));
         let (b0, b1, b2, a0, a1, a2) = match kind {
             FilterType::LowPass => (
                 (T::one() - cos) / two,
