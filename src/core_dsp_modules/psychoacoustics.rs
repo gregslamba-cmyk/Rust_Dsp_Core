@@ -403,4 +403,12 @@ mod tests {
         assert!(EqualLoudnessContour::phon_to_sone(0.0) == 0.0, "phon 0 should give 0 sone");
         assert!(EqualLoudnessContour::phon_to_sone(80.0) > 0.0, "phon 80 should give positive sone");
     }
+
+    #[test]
+    fn weighting_filter_1k_hz_response_alignment() {
+        let mut wf = WeightingFilter::new();
+        let ok = wf.configure(WeightingCurve::A, 48000.0, 2); assert!(ok);
+        let m = wf.magnitude_db(1000.0);
+        assert!((m - 0.0).abs() < 0.5, "A-weighting at 1 kHz should be ~0 dB, got {}", m);
+    }
 }

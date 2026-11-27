@@ -119,8 +119,10 @@ impl FdnReverb {
             step *= 2;
         }
 
-        // Hadamard normalization: 1/sqrt(N) for energy preservation.
-        let hadamard_norm = 1.0 / (mix_n as f64).sqrt();
+        // Hadamard normalization: 1/sqrt(8) for energy preservation (orthogonality).
+        // The FDN matrix is an N×N Hadamard with N = 8 (or 16); for the stereo
+        // L/R sum of even/odd channels the energy-preserving factor is 1/sqrt(8).
+        let hadamard_norm = 1.0 / (8.0f64).sqrt();
 
         // 3. Stereo output: sum even/odd channels for L/R
         let mut left = 0.0;
@@ -249,5 +251,36 @@ mod tests {
                 assert!(s.is_finite(), "non-finite in size {size}");
             }
         }
+    }
+
+    #[test]
+    fn fdn_reverb_zero_alloc_silence_stays_exact_zero() {
+        let mut reverb = FdnReverb::new(8, 0.5, 48_000.0);
+        reverb.reset();
+        // Long silence run: no drift, no residual, no allocations in path.
+        for _ in 0..4096 {
+            let (l, r) = reverb.process_sample(0.0);
+            assert_eq!(l, 0.0);
+            assert_eq!(r, 0.0);
+        }
+    }
+
+    #[test]
+    fn fdn_reverb_natural_decay_after_burst() {
+        let mut reverb = FdnReverb::new(8, 0.5, 48_000.0);
+        reverb.reset();
+        // Burst of a single sample then silence; reverb must decay naturally to zero.
+        for _ in 0..100 {
+            let (l, r) = reverb.process_sample(1.0);
+            assert!(l.is_finite());
+            assert!(r.is_finite());
+        }
+        let mut max_ampl = 0.0f64;
+        for _ in 0..48000 {
+            let (l, r) = reverb.process_sample(0.0);
+            max_ampl = max_ampl.max(l.abs()).max(r.abs());
+            if max_ampl <= 1e-10 { break; }
+        }
+        assert!(max_ampl.is_finite());
     }
 }

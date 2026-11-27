@@ -110,6 +110,7 @@ pub struct KWeightFilter {
 }
 
 impl KWeightFilter {
+    #[inline]
     pub fn configure(&mut self, sample_rate: f64) {
         self.hs.configure(sample_rate);
         self.hp.configure(sample_rate);
@@ -126,6 +127,7 @@ impl KWeightFilter {
         self.hp.reset();
     }
 }
+
 /// Goniometer ring buffer for L/R phase vector visualization.
 #[derive(Clone)]
 pub struct GoniometerRing {
@@ -170,35 +172,69 @@ impl GoniometerRing {
         (l_out, r_out)
     }
 }
-/// True-peak detector: inter-sample peak via 4x oversampling.
+/// True-peak detector: inter-sample peak via real 4× polyphase FIR oversampling.
 #[derive(Clone)]
 pub struct TruePeakDetector {
+    /// Running max of oversampled magnitudes.
     max_sample: f64,
+    /// 12-tap 4-phase interpolation FIR (windowed sinc), pre-normalized.
+    coeffs: [[f64; 12]; 4],
+    /// Input history ring (12 samples) for each phase.
+    history: [f64; 12],
+    write_pos: usize,
 }
 
 impl TruePeakDetector {
     pub fn new() -> Self {
-        Self { max_sample: 0.0 }
+        Self {
+            max_sample: 0.0,
+            coeffs: true_peak_coeffs(),
+            history: [0.0; 12],
+            write_pos: 0,
+        }
     }
 
     #[inline]
     pub fn reset(&mut self) {
         self.max_sample = 0.0;
+        self.history = [0.0; 12];
+        self.write_pos = 0;
     }
 
-    /// Process one sample; updates running max. Call per-sample then query.
+    /// Process one sample; updates running max with 4 interpolated sub-samples.
     #[inline]
     pub fn process(&mut self, x: f64) {
-        let mag = x.abs();
-        if mag.is_finite() && mag > self.max_sample {
-            self.max_sample = mag;
+        let xn = if x.is_finite() { x } else { 0.0 };
+        if let Some(slot) = self.history.get_mut(self.write_pos) {
+            *slot = xn;
+        }
+        self.write_pos = (self.write_pos + 1) % 12;
+
+        // Sample peak.
+        let direct = xn.abs();
+        if direct > self.max_sample {
+            self.max_sample = direct;
+        }
+
+        // Interpolated peak for each of the 4 phases.
+        for phase in 0..4 {
+            let mut acc = 0.0;
+            for (tap, coef) in self.coeffs[phase].iter().enumerate() {
+                // history index: newest sample is write_pos-1, going back in time.
+                let idx = (self.write_pos + 12 - 1 - tap) % 12;
+                acc += self.history.get(idx).copied().unwrap_or(0.0) * coef;
+            }
+            let mag = acc.abs();
+            if mag.is_finite() && mag > self.max_sample {
+                self.max_sample = mag;
+            }
         }
     }
 
-    /// Estimate true-peak amplitude including inter-sample peaks (conservative 1.25x).
+    /// True-peak amplitude including inter-sample peaks (oversampled).
     #[inline]
     pub fn true_peak_amplitude(&self) -> f64 {
-        self.max_sample * 1.25
+        if self.max_sample.is_finite() { self.max_sample } else { 0.0 }
     }
 
     pub fn set_sample(&mut self, sample: f64) {
@@ -206,43 +242,81 @@ impl TruePeakDetector {
     }
 }
 
+impl Default for TruePeakDetector {
+    fn default() -> Self { Self::new() }
+}
+
+/// Builds 4-phase × 12-tap windowed-sinc interpolation coefficients.
+/// Each phase reconstructs the signal at fractional offset `phase/4`.
+fn true_peak_coeffs() -> [[f64; 12]; 4] {
+    let mut coeffs = [[0.0f64; 12]; 4];
+    let taps = 12usize;
+    let center = (taps - 1) as f64 / 2.0;
+    for (phase, row) in coeffs.iter_mut().enumerate() {
+        let frac = phase as f64 / 4.0;
+        let mut sum = 0.0;
+        for (t, c) in row.iter_mut().enumerate() {
+            let x = t as f64 - center - frac;
+            let sinc = if x.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+            // Blackman-Harris window over the tap span.
+            let wpos = t as f64 / (taps - 1) as f64;
+            let w = 0.35875 - 0.48829 * (std::f64::consts::TAU * wpos).cos()
+                + 0.14128 * (2.0 * std::f64::consts::TAU * wpos).cos()
+                - 0.01168 * (3.0 * std::f64::consts::TAU * wpos).cos();
+            let v = sinc * w;
+            *c = v;
+            sum += v;
+        }
+        if sum.abs() > 1e-12 {
+            for c in row.iter_mut() { *c /= sum; }
+        }
+    }
+    coeffs
+}
+
 /// Main loudness engine: momentary, short-term, integrated LUFS + LRA + true-peak.
 #[derive(Clone)]
 pub struct LoudnessEngine {
-    k_weight: KWeightFilter,
+    k_weight_l: KWeightFilter,
+    k_weight_r: KWeightFilter,
     true_peak: TruePeakDetector,
     goniometer: GoniometerRing,
     ms_sum_sq: f64,
     ms_count: usize,
     st_sum_sq: f64,
     st_count: usize,
-    int_blocks: Vec<f64>,
+    int_blocks: [f64; 120],
     int_block_sum_sq: f64,
     int_block_count: usize,
     int_block_index: usize,
     sample_rate: f64,
+    int_block_capacity: usize,
 }
 
 impl LoudnessEngine {
     pub fn new(sample_rate: f64, goniometer_capacity: usize) -> Self {
         let sr = if sample_rate > 0.0 { sample_rate } else { 48000.0 };
-        let mut k = KWeightFilter::default();
-        k.configure(sr);
+        let mut k_l = KWeightFilter::default();
+        k_l.configure(sr);
+        let mut k_r = KWeightFilter::default();
+        k_r.configure(sr);
         let ms_samples = (sr * MOMENTARY_BLOCK_SEC) as usize;
         let st_samples = (sr * SHORTTERM_BLOCK_SEC) as usize;
         Self {
-            k_weight: k,
+            k_weight_l: k_l,
+            k_weight_r: k_r,
             true_peak: TruePeakDetector::new(),
             goniometer: GoniometerRing::new(goniometer_capacity),
             ms_sum_sq: 0.0,
             ms_count: ms_samples.max(1),
             st_sum_sq: 0.0,
             st_count: st_samples.max(1),
-            int_blocks: vec![0.0; 120],
+            int_blocks: [0.0; 120],
             int_block_sum_sq: 0.0,
             int_block_count: 0,
             int_block_index: 0,
             sample_rate: sr,
+            int_block_capacity: 120,
         }
     }
 
@@ -250,17 +324,19 @@ impl LoudnessEngine {
         let sr = if sample_rate > 0.0 { sample_rate } else { 48000.0 };
         if (sr - self.sample_rate).abs() > 1e-3 {
             self.sample_rate = sr;
-            self.k_weight.configure(sr);
+            self.k_weight_l.configure(sr);
+            self.k_weight_r.configure(sr);
         }
     }
 
     pub fn reset(&mut self) {
-        self.k_weight.reset();
+        self.k_weight_l.reset();
+        self.k_weight_r.reset();
         self.true_peak.reset();
         self.goniometer = GoniometerRing::new(self.goniometer.capacity);
         self.ms_sum_sq = 0.0;
         self.st_sum_sq = 0.0;
-        self.int_blocks = vec![0.0; self.int_blocks.len()];
+        for b in self.int_blocks.iter_mut() { *b = 0.0; }
         self.int_block_sum_sq = 0.0;
         self.int_block_count = 0;
         self.int_block_index = 0;
@@ -270,10 +346,10 @@ impl LoudnessEngine {
     pub fn process_sample(&mut self, left: f64, right: f64) {
         let l = if left.is_finite() { left } else { 0.0 };
         let r = if right.is_finite() { right } else { 0.0 };
-        let kl = self.k_weight.process(l);
-        let kr = self.k_weight.process(r);
-        let mean = (kl + kr) * 0.5;
-        let sq = mean * mean;
+        let kl = self.k_weight_l.process(l);
+        let kr = self.k_weight_r.process(r);
+        // ITU-R BS.1770-4: mean-square = kl² + kr² (not average).
+        let sq = kl * kl + kr * kr;
         self.true_peak.process(l);
         self.true_peak.process(r);
         self.goniometer.push(l, r);
@@ -285,13 +361,11 @@ impl LoudnessEngine {
 
     /// Add current momentary block to integrated history (called at 400ms boundaries).
     pub fn add_block(&mut self, ms_sum_sq: f64) {
-        if self.int_blocks.is_empty() { return; }
-        let idx = self.int_block_index % self.int_blocks.len();
-        if let Some(slot) = self.int_blocks.get_mut(idx) {
-            *slot = ms_sum_sq;
-        }
+        let cap = self.int_blocks.len();
+        let idx = self.int_block_index % cap;
+        self.int_blocks[idx] = ms_sum_sq;
         self.int_block_index += 1;
-        self.int_block_count = self.int_block_index.min(self.int_blocks.len());
+        self.int_block_count = self.int_block_index.min(cap);
         self.int_block_sum_sq += ms_sum_sq;
     }
 
@@ -308,22 +382,19 @@ impl LoudnessEngine {
     }
 
     pub fn integrated_lufs(&self) -> f64 {
-        if self.int_block_count == 0 {
+        let count = self.int_block_count;
+        if count == 0 {
             return ABSOLUTE_GATE_LUFS;
         }
-        let mut blocks: Vec<f64> = Vec::with_capacity(self.int_block_count);
-        for i in 0..self.int_block_count {
-            let idx = i % self.int_blocks.len();
-            if let Some(v) = self.int_blocks.get(idx) {
-                blocks.push(*v);
-            }
-        }
+        // Iterate fixed ring buffer without allocation.
         let mut gated_sum = 0.0;
         let mut gated_count = 0usize;
-        for b in &blocks {
-            let lufs = db_lufs(*b);
+        for i in 0..count {
+            let idx = i % self.int_blocks.len();
+            let b = self.int_blocks[idx];
+            let lufs = db_lufs(b);
             if lufs > ABSOLUTE_GATE_LUFS {
-                gated_sum += *b;
+                gated_sum += b;
                 gated_count += 1;
             }
         }
@@ -333,10 +404,12 @@ impl LoudnessEngine {
         let relative_threshold = db_lufs(gated_sum / gated_count as f64) + RELATIVE_GATE_OFFSET_LU;
         let mut rel_sum = 0.0;
         let mut rel_count = 0usize;
-        for b in &blocks {
-            let lufs = db_lufs(*b);
+        for i in 0..count {
+            let idx = i % self.int_blocks.len();
+            let b = self.int_blocks[idx];
+            let lufs = db_lufs(b);
             if lufs > ABSOLUTE_GATE_LUFS && lufs > relative_threshold {
-                rel_sum += *b;
+                rel_sum += b;
                 rel_count += 1;
             }
         }
@@ -352,15 +425,15 @@ impl LoudnessEngine {
         if n < 2 {
             return 0.0;
         }
-        let mut lufs_vals: Vec<f64> = Vec::with_capacity(n);
+        // Fixed-size stack copy for sorting (no heap allocation).
+        let cap = self.int_blocks.len();
+        let mut lufs_vals: [f64; 120] = [0.0; 120];
         for i in 0..n {
-            let idx = i % self.int_blocks.len();
-            if let Some(v) = self.int_blocks.get(idx) {
-                lufs_vals.push(db_lufs(*v));
-            }
+            let idx = i % cap;
+            lufs_vals[i] = db_lufs(self.int_blocks[idx]);
         }
-        lufs_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let len = lufs_vals.len();
+        lufs_vals[..n].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let len = n;
         let p10 = lufs_vals.get((len as f64 * 0.10).floor() as usize % len).copied().unwrap_or(0.0);
         let p95 = lufs_vals.get((len as f64 * 0.95).floor() as usize % len).copied().unwrap_or(0.0);
         let lra = (p95 - p10).max(0.0);
@@ -480,7 +553,7 @@ mod tests {
         let mut tp = TruePeakDetector::new();
         tp.process(0.5);
         tp.process(-0.8);
-        assert!((tp.true_peak_amplitude() - 0.8 * 1.25).abs() < 1e-9);
+        assert!((tp.true_peak_amplitude() - 0.8).abs() < 1e-6);
         tp.reset();
         assert!((tp.true_peak_amplitude() - 0.0).abs() < 1e-9);
     }

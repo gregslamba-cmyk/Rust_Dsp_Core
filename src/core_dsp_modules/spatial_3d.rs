@@ -34,14 +34,18 @@ impl HrtfCoefficients {
 
 #[inline]
 fn hrtf_for_direction(azimuth: f64, elevation: f64) -> HrtfCoefficients {
+    // Wrap azimuth to [-PI, PI] for correct left/right discrimination.
+    // rem_euclid gives [0, 2π); shift values > π to negative range.
     let az = azimuth.rem_euclid(2.0 * PI);
+    let az = if az > PI { az - 2.0 * PI } else { az };
     let _el = elevation.clamp(-PI / 2.0, PI / 2.0);
     let head_radius = 0.085;
     let speed_of_sound = 343.0;
     let itd = head_radius * az.sin() / speed_of_sound;
     let ild = 20.0 * (az.cos()).max(0.0).log10().max(-20.0);
-    let left_gain = if az > 0.0 { 1.0 } else { 0.8 };
-    let right_gain = if az < 0.0 { 1.0 } else { 0.8 };
+    // az > 0 = source to the right → right ear louder; az < 0 = left.
+    let left_gain = if az < 0.0 { 1.0 } else { 0.8 };
+    let right_gain = if az > 0.0 { 1.0 } else { 0.8 };
     HrtfCoefficients { left_gain, right_gain, itd_sec: itd, ild_db: ild }
 }
 
@@ -259,8 +263,10 @@ impl Spatial3d {
         let clean_input = if input.is_finite() { input } else { 0.0 };
         self.sample_count = self.sample_count.saturating_add(1);
 
-        // Fix azimuth sign: wrap to [-PI, PI] range.
-        let az = if azimuth > PI { azimuth - 2.0 * PI } else if azimuth < -PI { azimuth + 2.0 * PI } else { azimuth };
+        // Wrap azimuth to [-PI, PI] for correct HRTF left/right discrimination.
+        let az = azimuth.rem_euclid(2.0 * PI);
+        let az = if az > PI { az - 2.0 * PI } else { az };
+
         self.current_hrtf = hrtf_for_direction(az, elevation);
 
         if self.config.binaural {

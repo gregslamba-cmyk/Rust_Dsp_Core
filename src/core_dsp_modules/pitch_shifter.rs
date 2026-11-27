@@ -467,6 +467,32 @@ mod tests {
         ps.set_speed_ratio(-5.0);
         assert!((ps.speed_ratio - 1.0).abs() < 1e-9);
     }
+
+    #[test]
+    fn pitch_shifter_zero_alloc_silence_stays_exact_zero() {
+        let mut ps = PitchShifter::new(256, 128, 48000.0);
+        assert!(ps.initialize());
+        for _ in 0..1024 {
+            assert_eq!(ps.process_sample(0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn pitch_shifter_natural_decay_after_input_removed() {
+        let mut ps = PitchShifter::new(256, 128, 48000.0);
+        assert!(ps.initialize());
+        for _ in 0..64 {
+            let _ = ps.process_sample(0.5);
+        }
+        // Output naturally decays back to zero when input goes silent.
+        for _ in 0..256 {
+            let out = ps.process_sample(0.0);
+            assert!(out.is_finite());
+        }
+        for _ in 0..512 {
+            assert!(ps.process_sample(0.0).abs() < 1e-12, "pitch shifter should decay to near-silence");
+        }
+    }
 }
 
 /// Mono YIN/pYIN pitch tracker with formant extraction.

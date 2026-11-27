@@ -377,25 +377,42 @@ impl CompiledAudioGraph {
             }
         }
         for step in &self.steps {
-            let node = &mut self.nodes[step.node_idx];
-            // Copy inputs into isolated staging buffers to avoid cross-field borrow conflicts
-            for (slot, &_eidx) in step.in_edges.iter().enumerate() {
-                if let Some(buf) = self.edge_buffers.get(_eidx) {
+            // Copy inputs from edge_buffers into isolated staging buffers to avoid
+            // cross-field borrow conflicts between self.edge_buffers and self.nodes.
+            for (slot, &eidx) in step.in_edges.iter().enumerate() {
+                if let Some(buf) = self.edge_buffers.get(eidx) {
                     if let Some(ch0) = self.in_staging.get_mut(slot).and_then(|s| s.channel_mut(0)) {
                         let n = num_samples.min(ch0.len());
                         for i in 0..n { ch0[i] = buf.channel(0).map(|b| b[i]).unwrap_or(0.0); }
                     }
                 }
             }
-            // Build in_slices from staging (immutable, distinct field from edge_buffers)
-            let mut in_slices: Vec<&[f64]> = Vec::with_capacity(step.in_edges.len());
-            for (slot, &_eidx) in step.in_edges.iter().enumerate() {
+            // Build pre-allocated in_slices on the stack (zero Vec heap allocation in audio path).
+            let empty: &[f64] = &[];
+            let mut in_slices: [&[f64]; MAX_AUDIO_CHANNELS] = [empty; MAX_AUDIO_CHANNELS];
+            let mut n_in = 0usize;
+            for slot in 0..step.in_edges.len() {
                 if let Some(ch0) = self.in_staging.get(slot).and_then(|s| s.channel(0)) {
-                    in_slices.push(ch0);
+                    if n_in < MAX_AUDIO_CHANNELS {
+                        in_slices[n_in] = ch0;
+                        n_in += 1;
+                    }
                 }
             }
-            // Node processes, writing to final audio output channels
-            node.process_node(&in_slices, outputs, self.num_channels, num_samples);
+            // Process node: terminal nodes write to final outputs, intermediate nodes
+            // write to their first out-edge buffer to propagate the signal downstream.
+            let node = &mut self.nodes[step.node_idx];
+            if step.out_edges.is_empty() {
+                node.process_node(&in_slices[..n_in], outputs, self.num_channels, num_samples);
+            } else if let Some(&eidx) = step.out_edges.first() {
+                if let Some(buf) = self.edge_buffers.get_mut(eidx) {
+                    if let Some(ch0) = buf.channel_mut(0) {
+                        let n = num_samples.min(ch0.len());
+                        let mut temp_out: [&mut [f64]; 1] = [ch0];
+                        node.process_node(&in_slices[..n_in], &mut temp_out, 1, n);
+                    }
+                }
+            }
         }
         // Post-sanitize outputs after all node processing
         for ch in 0..self.num_channels {

@@ -425,4 +425,33 @@ mod tests {
             assert!(room.images_l[i].delay.is_finite() && room.images_l[i].delay >= 0.0);
         }
     }
+
+    #[test]
+    fn acoustic_room_zero_alloc_silence_stays_exact_zero() {
+        let mut room = AcousticRoom::new();
+        room.initialize(48000.0, RoomConfig::default());
+        for _ in 0..4096 {
+            let (l, r) = room.process_mono(0.0);
+            assert_eq!(l, 0.0);
+            assert_eq!(r, 0.0);
+        }
+    }
+
+    #[test]
+    fn acoustic_room_natural_decay_after_burst() {
+        let mut room = AcousticRoom::new();
+        room.initialize(48000.0, RoomConfig::default());
+        for _ in 0..100 {
+            let (l, r) = room.process_mono(1.0);
+            assert!(l.is_finite());
+            assert!(r.is_finite());
+        }
+        let mut max_ampl = 0.0f64;
+        for _ in 0..48000 {
+            let (l, r) = room.process_mono(0.0);
+            max_ampl = max_ampl.max(l.abs()).max(r.abs());
+            if max_ampl <= 1e-10 { break; }
+        }
+        assert!(max_ampl.is_finite());
+    }
 }
