@@ -75,8 +75,11 @@ impl FdnReverb {
     pub fn process_sample(&mut self, input: f64) -> (f64, f64) {
         let clean_in = if input.is_finite() { input } else { 0.0 };
         // Apply velvet-noise input diffusion (all-pass cascade).
-        let diffuse = self.velvet_diffuser.process_stage(0, clean_in) * 0.7
-            + self.velvet_diffuser.process_stage(1, clean_in) * 0.3;
+        let mut diffuse = 0.0;
+            for i in 0..8 {
+                diffuse += self.velvet_diffuser.process_stage(i, clean_in);
+            }
+            diffuse *= 0.125; // preserve overall level
         let clean_in = if diffuse.is_finite() { diffuse } else { clean_in };
         // Advance asymmetric LFO (per-sample).
         self.lfo.advance(1);
