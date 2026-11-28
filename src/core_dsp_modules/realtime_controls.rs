@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # Real-Time Parameter Smoothing, Envelopes & Bypass Crossfade
 //!
 //! Questo modulo implementa le primitive fondamentali per il controllo real-time senza click:

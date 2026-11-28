@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # Acoustic Room — Image-Source + Diffusion Reverb
 //!
 //! Physical-model-inspired room acoustics simulation.

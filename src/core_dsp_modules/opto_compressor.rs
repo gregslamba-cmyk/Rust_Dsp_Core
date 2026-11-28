@@ -1,7 +1,7 @@
-//! # Electro-Optical Attenuator Modeling (T4B Cell - LA-2A & LA-3A)
+//! # Electro-Optical Attenuator Modeling (Greg-A2A / Greg-A3A)
 //!
 //! Questo modulo emula la risposta dinamica non lineare delle celle elettro-ottiche
-//! storiche (Teletronix T4A/T4B a elettroluminescenza e fotoresistori al solfuro di cadmio CdS),
+//! storiche (Greg-A2A / Greg-A3A a elettroluminescenza e fotoresistori al solfuro di cadmio CdS),
 //! utilizzate nel livellatore valvolare `greg-a2a` e nel modello a stato solido `greg-a3a`.
 //!
 //! ## Topologia Circuitale e Comportamento Fisico
@@ -10,29 +10,29 @@
 //!   attenuando passivamente il segnale audio nel circuito di partizione. La persistenza chimica
 //!   del drogaggio crea una memoria d'inviluppo organica ("program dependency").
 //! - **Rilascio a Doppio Stadio (Two-Stage Release):** Il primo 50% della riduzione di guadagno
-//!   decade rapidamente (~60 ms per LA-2A, ~25 ms per LA-3A), mentre la restante parte rilascia
+//!   decade rapidamente (~60 ms per Greg-A2A, ~25 ms per Greg-A3A), mentre la restante parte rilascia
 //!   molto lentamente (da 0.5 s fino a 5 secondi), prevenendo l'effetto "pumping" tipico dei VCA convenzionali.
 //! - **Modalità Compress vs Limit:** Modula la pendenza di compressione da un soft-knee musicale (~3:1)
 //!   a una limitazione più decisa (~8:1 - 10:1).
 
 use num_traits::Float;
 
-/// Tempo di attacco nominale per cella ottica valvolare LA-2A (~10 ms per raggiungere il 63% dell'attenuazione).
+/// Tempo di attacco nominale per cella ottica valvolare Greg-A2A (~10 ms per raggiungere il 63% dell'attenuazione).
 pub const OPTO_A2A_ATTACK_SECONDS: f64 = 0.010;
-/// Tempo di emivita del rilascio veloce per LA-2A (~60 ms per il primo 50% di recupero).
+/// Tempo di emivita del rilascio veloce per Greg-A2A (~60 ms per il primo 50% di recupero).
 pub const OPTO_A2A_FAST_RELEASE_SECONDS: f64 = 0.060;
-/// Rilascio lento minimo per LA-2A in assenza di accumulo storico di programma (~0.5 s).
+/// Rilascio lento minimo per Greg-A2A in assenza di accumulo storico di programma (~0.5 s).
 pub const OPTO_A2A_SLOW_RELEASE_MIN_SECONDS: f64 = 0.5;
-/// Rilascio lento massimo per LA-2A dopo prolungata e intensa compressione (~5.0 s).
+/// Rilascio lento massimo per Greg-A2A dopo prolungata e intensa compressione (~5.0 s).
 pub const OPTO_A2A_SLOW_RELEASE_MAX_SECONDS: f64 = 5.0;
 
-/// Tempo di attacco nominale per cella ottica a stato solido LA-3A (~3.5 ms, transitorio più scattante).
+/// Tempo di attacco nominale per cella ottica a stato solido Greg-A3A (~3.5 ms, transitorio più scattante).
 pub const OPTO_A3A_ATTACK_SECONDS: f64 = 0.0035;
-/// Tempo di emivita del rilascio veloce per LA-3A (~25 ms).
+/// Tempo di emivita del rilascio veloce per Greg-A3A (~25 ms).
 pub const OPTO_A3A_FAST_RELEASE_SECONDS: f64 = 0.025;
-/// Rilascio lento minimo per LA-3A (~0.12 s).
+/// Rilascio lento minimo per Greg-A3A (~0.12 s).
 pub const OPTO_A3A_SLOW_RELEASE_MIN_SECONDS: f64 = 0.12;
-/// Rilascio lento massimo per LA-3A (~1.5 s).
+/// Rilascio lento massimo per Greg-A3A (~1.5 s).
 pub const OPTO_A3A_SLOW_RELEASE_MAX_SECONDS: f64 = 1.5;
 
 /// Modalità operativa della cella opto (Compress vs Limit).
@@ -45,7 +45,7 @@ pub enum OptoMode {
     Limit,
 }
 
-/// Simulatore dinamico della cella fotoresistiva elettro-ottica T4B.
+/// Simulatore dinamico della cella fotoresistiva elettro-ottica Greg-A2A.
 ///
 /// Modella memoria fotochimica di programma, attacco non lineare e recupero a due stadi.
 #[derive(Clone, Copy, Debug)]
@@ -101,7 +101,7 @@ impl<T: Float> OptoCell<T> {
         true
     }
 
-    /// Processa la riduzione di guadagno istantanea per profilo valvolare classico (LA-2A).
+    /// Processa la riduzione di guadagno istantanea per profilo valvolare classico (Greg-A2A).
     ///
     /// # Parametri
     /// - `target_reduction_db`: Attenuazione target richiesta dal detector in dB.
@@ -113,7 +113,7 @@ impl<T: Float> OptoCell<T> {
         self.process_with_character(target_reduction_db, false)
     }
 
-    /// Processa la riduzione di guadagno istantanea per profilo a stato solido più reattivo (LA-3A).
+    /// Processa la riduzione di guadagno istantanea per profilo a stato solido più reattivo (Greg-A3A).
     ///
     /// # Parametri
     /// - `target_reduction_db`: Attenuazione target richiesta dal detector in dB.
@@ -133,7 +133,7 @@ impl<T: Float> OptoCell<T> {
         let target = if target_reduction_db.is_finite() {
             target_reduction_db
                 .max(T::zero())
-                .min(T::from(60.0).unwrap())
+                .min(T::from(60.0).unwrap_or(T::zero()))
         } else {
             T::zero()
         };
@@ -157,7 +157,7 @@ impl<T: Float> OptoCell<T> {
             self.fast_release = false;
             self.release_start_db = T::zero();
 
-            // L'attacco ottico diventa leggermente più veloce su transienti più forti (caratteristica T4B)
+            // L'attacco ottico diventa leggermente più veloce su transienti più forti (caratteristica Greg-A2A)
             let attack_base = if solid_state {
                 OPTO_A3A_ATTACK_SECONDS
             } else {
@@ -255,7 +255,7 @@ impl<T: Float> OptoCell<T> {
     }
 }
 
-/// Calcola l'attenuazione ideale statica target in dB per il circuito LA-2A.
+/// Calcola l'attenuazione ideale statica target in dB per il circuito Greg-A2A.
 ///
 /// # Parametri
 /// - `input_level_db`: Livello RMS o di picco del segnale in ingresso in dBFS.
@@ -265,7 +265,7 @@ pub fn target_reduction_db<T: Float>(input_level_db: T, peak_reduction_db: T, mo
     target_reduction_db_for_character(input_level_db, peak_reduction_db, mode, false)
 }
 
-/// Calcola l'attenuazione ideale statica target in dB per il circuito LA-3A a stato solido.
+/// Calcola l'attenuazione ideale statica target in dB per il circuito Greg-A3A a stato solido.
 pub fn target_solid_state_reduction_db<T: Float>(
     input_level_db: T,
     peak_reduction_db: T,

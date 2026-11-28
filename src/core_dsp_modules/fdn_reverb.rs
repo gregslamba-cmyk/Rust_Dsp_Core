@@ -122,10 +122,9 @@ impl FdnReverb {
             step *= 2;
         }
 
-        // Hadamard normalization: 1/sqrt(8) for energy preservation (orthogonality).
-        // The FDN matrix is an N×N Hadamard with N = 8 (or 16); for the stereo
-        // L/R sum of even/odd channels the energy-preserving factor is 1/sqrt(8).
-        let hadamard_norm = 1.0 / (8.0f64).sqrt();
+        // Hadamard normalization: 1/sqrt(N) for energy preservation (orthogonality).
+        // H_N is orthonormal only when scaled by 1/sqrt(N); for N = 16 the factor is 1/4 (0.25).
+        let hadamard_norm = 1.0 / (mix_n as f64).sqrt();
 
         // 3. Stereo output: sum even/odd channels for L/R
         let mut left = 0.0;

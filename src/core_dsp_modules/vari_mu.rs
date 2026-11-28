@@ -1,7 +1,7 @@
-//! # Variable-Mu Tube Compression & Time Constant Network (Fairchild 670/660)
+//! # Variable-Mu Tube Compression & Time Constant Network (Vari-Mu valve comp topology / stadio valvolare a transconduttanza variabile)
 //!
 //! Questo modulo emula la risposta circuitale dei compressori/limiter valvolari Vari-Mu
-//! (in particolare il leggendario Fairchild 670 stereo e 660 mono), basati sulla modulazione
+//! (in particolare il topologia Vari-Mu valvolare per compressore stereo e mono), basati sulla modulazione
 //! dinamica del punto di lavoro di tubi termoionici a cut-off remoto (come i doppi triodi 6386).
 //!
 //! ## Topologia Circuitale Emulata
@@ -20,7 +20,7 @@ use num_traits::Float;
 /// Tempo di attacco nominale storico del circuito Vari-Mu (~0.2 ms / 200 microsecondi).
 pub const VARI_MU_ATTACK_SECONDS: f64 = 0.0002;
 
-/// Le sei posizioni storiche del selettore di costante temporale del Fairchild 670/660.
+/// Le sei posizioni storiche del selettore di costante temporale del Vari-Mu valvolare.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum TimeConstant {
@@ -244,7 +244,7 @@ mod tests {
     use super::{TimeConstant, VARI_MU_ATTACK_SECONDS, VariMuCell, vari_mu_target_reduction_db};
 
     #[test]
-    fn historical_fairchild_attack_nominal_is_represented() {
+    fn historical_vari_mu_attack_nominal_is_represented() {
         assert_eq!(VARI_MU_ATTACK_SECONDS, 0.0002);
     }
 

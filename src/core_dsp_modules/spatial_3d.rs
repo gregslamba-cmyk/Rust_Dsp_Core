@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # Spatial 3D — HRIR, Ambisonics & VBAP Panning
 //!
 //! Motore per posizionamento audio 3D, binaural rendering con HRIR,

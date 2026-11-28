@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # Real-Time Panic Protection & Host Crash Prevention
 //!
 //! Questo modulo fornisce una barriera di sicurezza lock-free per intercettare eventuali
